@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#2b6cb0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Family">
-<link rel="stylesheet" href="style.css?v=17">
+<link rel="stylesheet" href="style.css?v=20">
 </head>
 <body>
 <header class="top">
@@ -64,6 +64,7 @@
   <div id="detailBody"></div>
   <div class="actions">
     <button type="button" id="detailEdit">Edit</button>
+    <button type="button" id="detailDup">Duplicate</button>
     <span class="spacer"></span>
     <button type="button" id="detailClose" class="primary">Close</button>
   </div>
@@ -84,20 +85,26 @@
     </div>
     <label id="tzRow">Time zone <select name="tz"></select></label>
     <small id="tzHint"></small>
+    <label id="endDateRow">Ends on <small>(only for events that span days; the End time above is on this day)</small>
+      <input type="date" name="end_date"></label>
     <fieldset><legend>Who's involved</legend><div id="whoBox" class="pills"></div></fieldset>
     <label>Location <input name="location" autocomplete="off"></label>
     <div class="row">
-      <label>Repeats
+      <label class="wide">Repeats
         <select name="repeat">
           <option value="none">Never</option>
           <option value="daily">Daily</option>
           <option value="weekly">Weekly</option>
+          <option value="weekly:2">Every 2 weeks</option>
+          <option value="weekly:3">Every 3 weeks</option>
+          <option value="weekly:4">Every 4 weeks</option>
           <option value="monthly">Monthly</option>
           <option value="yearly">Yearly</option>
         </select>
       </label>
       <label>Until <input type="date" name="repeat_until"></label>
     </div>
+    <fieldset id="daysRow" hidden><legend>Repeat on</legend><div id="daysBox" class="pills"></div></fieldset>
     <label class="check" id="yearsRow" hidden><input type="checkbox" name="show_years"> Count the years (shows "turns 36"). Set the Date above to the real birth or start date, including the year.</label>
     <fieldset><legend>Remind me <small id="remindWho"></small></legend><div id="remindBox" class="pills"></div></fieldset>
     <label>Notes <textarea name="notes" rows="2"></textarea></label>
@@ -168,9 +175,9 @@
 <div id="toast" hidden></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="config.js?v=17"></script>
-<script src="motd.js?v=17"></script>
-<script src="quickadd.js?v=17"></script>
-<script src="app.js?v=17"></script>
+<script src="config.js?v=20"></script>
+<script src="motd.js?v=20"></script>
+<script src="quickadd.js?v=20"></script>
+<script src="app.js?v=20"></script>
 </body>
 </html>

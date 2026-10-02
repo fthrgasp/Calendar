@@ -4,7 +4,7 @@ A shared family calendar as an installable web app (PWA). Plain HTML/CSS/JS, no 
 Live at https://cal.tryingmybest.org (Spaceship cPanel hosting). Backend: Supabase (login, Postgres with row-level security, scheduled reminders).
 
 ## What it does
-Month / week / agenda views · per-person colors and who's-involved · repeats (daily, weekly, monthly, yearly) · "turns 36" age counting ·
+Month / week / agenda views · per-person colors and who's-involved · repeats (daily, weekly on chosen days, every N weeks, monthly, yearly) · multi-day events · Duplicate event · "turns 36" age counting ·
 time zones (everyone sees times in their own zone) · per-person reminders with web push · read-only event cards (edit is a separate, deliberate button) ·
 Quick add from pasted text (+ iPhone Shortcut, see `docs/SHORTCUT.md`) · jump-to-date · 12/24-hour display · soft-delete Trash (30 days) ·
 message of the day with a per-device "spicy" switch (`motd.js`: add your own lines) · invite links · daily backups.
@@ -12,7 +12,7 @@ message of the day with a per-device "spicy" switch (`motd.js`: add your own lin
 ## Files
 - `index.html`, `app.js`, `style.css`, `sw.js`, `manifest.webmanifest`, `icons/` — the app. `motd.js` — messages. `quickadd.js` + `vendor/` — text-to-event reading.
 - `config.js` — Supabase URL + publishable key (public by design; access is enforced by RLS).
-- `schema.sql` — full database for a fresh Supabase project. `migrations/` — incremental SQL for the existing project, applied in order (001–007).
+- `schema.sql` — full database for a fresh Supabase project. `migrations/` — incremental SQL for the existing project, applied in order (001–010).
 - `supabase/functions/send-reminders/` — the reminder/push function. `scripts/` — `build_zip.sh`, `backup.sh`, `backup_to_sql.py` (restore).
 - `secrets/` — **never committed.** VAPID keys, CRON_SECRET, backup password, and "READY" SQL/scripts with secrets filled in.
 

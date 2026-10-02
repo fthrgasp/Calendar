@@ -1,5 +1,5 @@
 // Offline shell (network first, fall back to cache) plus web-push display.
-const CACHE = 'famcal-shell-v17';
+const CACHE = 'famcal-shell-v20';
 const FILES = ['./', 'index.html', 'app.js', 'style.css', 'manifest.webmanifest', 'config.js', 'motd.js', 'quickadd.js', 'icons/icon-192.png'];
 // Cache files one by one: a single missing file must never abort the install (addAll is all-or-nothing).
 self.addEventListener('install', e => e.waitUntil(caches.open(CACHE).then(c => Promise.allSettled(FILES.map(f => c.add(f))))));

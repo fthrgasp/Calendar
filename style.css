@@ -108,3 +108,11 @@ section button { margin: 4px 4px 4px 0; }
 .dsub { margin: -6px 0 10px 15px; color: var(--accent); font-weight: 600; }
 #yearsRow[hidden] { display: none; }
 #yearsRow { margin: 0 0 8px; align-items: flex-start; font-size: .85rem; }
+
+.pill.locked { cursor: default; opacity: .85; }
+#daysRow[hidden] { display: none; }
+.row label { min-width: 0; }
+.row label.wide { flex: 0 0 47%; }
+
+.ev-mini.cont { border-left-style: dashed; opacity: .9; }
+#endDateRow small { color: var(--muted); }

@@ -35,10 +35,25 @@ function occurrenceDates(ev, fromMs, toMs) {
     return out;
   }
   const s = new Date(start);
+  if (ev.repeat === 'weekly' && ev.weekdays && ev.weekdays.length > 1) {
+    // Several days per week: weeks start Sunday, counted from the start date's week (same rule as the app).
+    const every = ev.repeat_every || 1, week0 = start - s.getUTCDay() * DAY, step = 7 * every * DAY;
+    const days = [...ev.weekdays].sort((a, b) => a - b);
+    for (let w = Math.max(0, Math.floor((fromMs - week0) / step) - 1); ; w++) {
+      const ws = week0 + w * step;
+      if (ws > toMs || (until !== null && ws > until)) break;
+      for (const wd of days) {
+        const d = ws + wd * DAY;
+        if (d < start || d < fromMs || d > toMs || (until !== null && d > until)) continue;
+        out.push(fmtD(d));
+      }
+    }
+    return out;
+  }
   for (let i = 0; i < 5000; i++) {
     let d;
     if (ev.repeat === 'daily') d = start + i * DAY;
-    else if (ev.repeat === 'weekly') d = start + 7 * i * DAY;
+    else if (ev.repeat === 'weekly') d = start + 7 * (ev.repeat_every || 1) * i * DAY;
     else if (ev.repeat === 'yearly') { // a Feb 29 date falls on Feb 28 in non-leap years
       d = Date.UTC(s.getUTCFullYear() + i, s.getUTCMonth(), s.getUTCDate());
       if (new Date(d).getUTCMonth() !== s.getUTCMonth()) d = Date.UTC(s.getUTCFullYear() + i, s.getUTCMonth() + 1, 0);

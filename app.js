@@ -97,7 +97,8 @@ const store = {
       events: events.map(e => ({
         id: e.id, title: e.title, date: e.date, all_day: e.all_day,
         start_time: (e.start_time || '').slice(0, 5), end_time: (e.end_time || '').slice(0, 5),
-        location: e.location, notes: e.notes, repeat: e.repeat, repeat_until: e.repeat_until || '', tz: e.tz, show_years: e.show_years,
+        location: e.location, notes: e.notes, repeat: e.repeat, repeat_until: e.repeat_until || '', tz: e.tz, show_years: e.show_years, repeat_every: e.repeat_every, weekdays: e.weekdays,
+        end_date: e.end_date === undefined ? undefined : e.end_date || '',
         created_by: e.created_by, deleted_at: e.deleted_at,
         who: e.event_members.map(x => x.member_id),
         // involved but never saved reminders -> the server uses your defaults, so show those
@@ -114,6 +115,9 @@ const store = {
       start_time: ev.all_day ? null : ev.start_time || null, end_time: ev.all_day ? null : ev.end_time || null,
       location: ev.location, notes: ev.notes, repeat: ev.repeat, repeat_until: ev.repeat_until || null, tz: ev.tz || null,
       ...(ev.show_years === undefined ? {} : { show_years: ev.show_years }), // omitted until the column exists
+      ...(ev.repeat_every === undefined ? {} : { repeat_every: ev.repeat_every }), // same for repeat_every
+      ...(ev.weekdays === undefined ? {} : { weekdays: ev.weekdays }), // and weekdays
+      ...(ev.end_date === undefined ? {} : { end_date: ev.end_date || null }), // and end_date
       created_by: ev.created_by, deleted_at: ev.deleted_at,
     }));
     await run(sb.from('event_members').delete().eq('event_id', ev.id));
@@ -153,9 +157,19 @@ function yearsLabel(ev, occDate) {
   return `${n} years`;
 }
 
+// "weekdays", "weekends", "Mon–Fri", "Mon, Wed, Fri"
+function daysLabel(days) {
+  const d = [...days].sort((a, b) => a - b), key = d.join();
+  if (key === '1,2,3,4,5') return 'weekdays';
+  if (key === '0,6') return 'weekends';
+  const runs = [];
+  for (const x of d) { const last = runs[runs.length - 1]; if (last && last[1] === x - 1) last[1] = x; else runs.push([x, x]); }
+  return runs.map(([a, b]) => b - a >= 2 ? `${DOW[a]}–${DOW[b]}` : a === b ? DOW[a] : `${DOW[a]}, ${DOW[b]}`).join(', ');
+}
+
 // ---------- recurrence ----------
 // Expands an event into occurrences falling on days within [from, to] (inclusive Dates).
-function occurrences(ev, from, to) {
+function occurrenceStarts(ev, from, to) {
   const out = [];
   const start = parse(ev.date);
   const until = ev.repeat_until ? parse(ev.repeat_until) : null;
@@ -164,10 +178,25 @@ function occurrences(ev, from, to) {
     if (start >= from && start <= to) push(start);
     return out;
   }
+  if (ev.repeat === 'weekly' && ev.weekdays && ev.weekdays.length > 1) {
+    // Several days per week: walk week by week (weeks start Sunday, counted from the start date's week).
+    const every = ev.repeat_every || 1, week0 = addDays(start, -start.getDay()), days = [...ev.weekdays].sort((a, b) => a - b);
+    const first = Math.max(0, Math.floor(Math.round((from - week0) / 864e5) / (7 * every)) - 1);
+    for (let w = first; ; w++) {
+      const ws = addDays(week0, 7 * every * w);
+      if (ws > to || (until && ws > until)) break;
+      for (const wd of days) {
+        const d = addDays(ws, wd);
+        if (d < start || d < from || d > to || (until && d > until)) continue;
+        push(d);
+      }
+    }
+    return out;
+  }
   for (let i = 0; i < 5000; i++) {
     let d;
     if (ev.repeat === 'daily') d = addDays(start, i);
-    else if (ev.repeat === 'weekly') d = addDays(start, 7 * i);
+    else if (ev.repeat === 'weekly') d = addDays(start, 7 * (ev.repeat_every || 1) * i);
     else if (ev.repeat === 'yearly') { // same month/day each year; a Feb 29 date falls on Feb 28 in non-leap years
       d = new Date(start.getFullYear() + i, start.getMonth(), start.getDate());
       if (d.getMonth() !== start.getMonth()) d = new Date(start.getFullYear() + i, start.getMonth() + 1, 0);
@@ -181,6 +210,22 @@ function occurrences(ev, from, to) {
   return out;
 }
 
+// Days an event covers within [from, to]. A multi-day event (end_date after date) yields one entry per day,
+// and repeating multi-day events expand every occurrence over its full length.
+const spanDays = ev => ev.end_date && ev.end_date > ev.date ? Math.round((parse(ev.end_date) - parse(ev.date)) / 864e5) : 0;
+function occurrences(ev, from, to) {
+  const span = spanDays(ev);
+  if (!span) return occurrenceStarts(ev, from, to);
+  const out = [];
+  for (const o of occurrenceStarts(ev, addDays(from, -span), to)) { // an occurrence starting before `from` may still reach into it
+    for (let k = 0; k <= span; k++) {
+      const d = addDays(parse(o.date), k);
+      if (d >= from && d <= to) out.push({ ev, date: ymd(d), day: k, span, startDate: o.date });
+    }
+  }
+  return out;
+}
+
 // ---------- state ----------
 let view = 'month';
 let cursor = new Date(); cursor.setDate(1);
@@ -190,15 +235,26 @@ const hidden = new Set(); // member ids filtered out
 
 // Convert one occurrence (dated in the event's own zone) into the viewer's zone.
 // `from` is set only when the event started in a different zone, e.g. "1pm EDT".
-function toViewer(ev, date) {
-  const same = { ev, date, start: ev.all_day ? '' : ev.start_time, end: ev.all_day ? '' : ev.end_time, from: null };
+// A multi-day event keeps the dates it was entered with (no zone shifting); each day shows the part that applies to it.
+function multiDayView(ev, o) {
+  const timed = !ev.all_day && ev.start_time;
+  const zoneTag = timed && ev.tz && ev.tz !== myTz() ? tzAbbr(wallToMs(o.startDate, ev.start_time, ev.tz), ev.tz) : '';
+  return {
+    ev, date: o.date, src: o.startDate, startDate: o.startDate, day: o.day, span: o.span, zoneTag, from: null,
+    start: o.day === 0 && timed ? ev.start_time : '',
+    end: o.day === o.span && !ev.all_day && ev.end_time ? ev.end_time : '',
+  };
+}
+function toViewer(ev, date, o) {
+  if (o && o.span > 0) return multiDayView(ev, o);
+  const same = { ev, date, src: date, start: ev.all_day ? '' : ev.start_time, end: ev.all_day ? '' : ev.end_time, from: null };
   const vz = myTz();
   if (!ev.tz || ev.all_day || !ev.start_time || ev.tz === vz) return same;
   const startMs = wallToMs(date, ev.start_time, ev.tz);
   const s = msToWall(startMs, vz);
   if (s.time === ev.start_time && s.date === date) return same; // zones happen to agree at this moment
   const end = ev.end_time ? msToWall(wallToMs(date, ev.end_time, ev.tz), vz).time : '';
-  return { ev, date: s.date, start: s.time, end, from: `${fmtTime(ev.start_time)} ${tzAbbr(startMs, ev.tz)}` };
+  return { ev, date: s.date, src: date, start: s.time, end, from: `${fmtTime(ev.start_time)} ${tzAbbr(startMs, ev.tz)}` };
 }
 
 const visibleEvents = (from, to, ignoreFilter = false) => {
@@ -209,7 +265,7 @@ const visibleEvents = (from, to, ignoreFilter = false) => {
     if (!ignoreFilter && hidden.size && ev.who.length && ev.who.every(w => hidden.has(w))) continue;
     // widen by a day each side: a zone shift can move an occurrence across the range edge
     for (const o of occurrences(ev, addDays(from, -1), addDays(to, 1))) {
-      const v = toViewer(ev, o.date);
+      const v = toViewer(ev, o.date, o);
       if (v.date >= fromKey && v.date <= toKey) list.push(v);
     }
   }
@@ -252,7 +308,7 @@ function renderMonth() {
       onclick: items.length ? () => { view = 'agenda'; agendaFrom = d; render(); window.scrollTo(0, 0); } : null,
     },
       el('span', { class: 'n' }, String(d.getDate())),
-      items.slice(0, 3).map(o => el('div', { class: 'ev-mini', style: `--c:${colorOf(o.ev)}` }, o.ev.title)),
+      items.slice(0, 3).map(o => el('div', { class: 'ev-mini' + (o.day > 0 ? ' cont' : ''), style: `--c:${colorOf(o.ev)}` }, (o.day > 0 ? '↳ ' : '') + o.ev.title)),
       items.length > 3 ? el('div', { class: 'more' }, `+${items.length - 3} more`) : ''));
   }
   return g;
@@ -267,7 +323,13 @@ function dayCard(d, items) {
 
 function eventRow(o) {
   const ev = o.ev;
-  const time = ev.all_day ? 'All day' : `${fmtTime(o.start)}${o.end ? '–' + fmtTime(o.end) : ''}${o.from ? ` (${o.from})` : ''}`;
+  let time = ev.all_day ? 'All day' : `${fmtTime(o.start)}${o.end ? '–' + fmtTime(o.end) : ''}${o.from ? ` (${o.from})` : ''}`;
+  if (o.span > 0) { // multi-day: say which part of the run this day is
+    const tag = o.zoneTag ? ` ${o.zoneTag}` : '';
+    const part = ev.all_day || (o.day > 0 && o.day < o.span) ? 'All day'
+      : o.day === 0 ? `from ${fmtTime(o.start)}${tag}` : o.end ? `until ${fmtTime(o.end)}${tag}` : 'last day';
+    time = `${part} · day ${o.day + 1} of ${o.span + 1}`;
+  }
   return el('div', { class: 'ev', style: `--c:${colorOf(ev)}`, onclick: () => openDetail(o) },
     el('div', { class: 'bar' }),
     el('div', {},
@@ -378,26 +440,45 @@ function pillSet(box, options, selected, colorFor) {
   }));
 }
 
-let selWho = new Set(), selRemind = new Set();
+let selWho = new Set(), selRemind = new Set(), selDays = new Set();
+
+// Duplicate: opens the new-event form filled with a copy of this event (nothing saves until Save is pressed).
+function duplicatePrefill(o) {
+  const ev = o.ev;
+  return {
+    title: ev.title, date: o.src || ev.date, all_day: ev.all_day, start_time: ev.start_time, end_time: ev.end_time,
+    location: ev.location, notes: ev.notes, repeat: ev.repeat, repeat_every: ev.repeat_every, repeat_until: ev.repeat_until,
+    weekdays: ev.weekdays, end_date: ev.end_date, show_years: ev.show_years, who: ev.who, tz: ev.tz, remind: ev.reminders[db.me] || [],
+    note: `Copied from “${ev.title}”. Change what's different, then press Save.`,
+  };
+}
 
 // Read-only card: tapping an event only looks. Changing anything takes a deliberate press of Edit.
 function openDetail(o) {
   const ev = o.ev, d = $('#detailDlg');
   const when = parse(o.date).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
   const time = ev.all_day ? 'All day' : `${fmtTime(o.start)}${o.end ? '–' + fmtTime(o.end) : ''}${o.from ? ` (${o.from})` : ''}`;
-  const repeatText = { daily: 'Repeats daily', weekly: 'Repeats weekly', monthly: 'Repeats monthly', yearly: 'Repeats yearly' }[ev.repeat];
+  const repeatBase = ev.repeat === 'weekly' && ev.repeat_every > 1 ? `Repeats every ${ev.repeat_every} weeks`
+    : { daily: 'Repeats daily', weekly: 'Repeats weekly', monthly: 'Repeats monthly', yearly: 'Repeats yearly' }[ev.repeat];
+  const repeatText = repeatBase && repeatBase + (ev.repeat === 'weekly' && ev.weekdays && ev.weekdays.length > 1 ? ' on ' + daysLabel(ev.weekdays) : '');
   const mins = ev.reminders[db.me] || [];
   const row = (label, value) => value ? el('div', { class: 'drow' }, el('span', { class: 'dlabel' }, label), el('span', {}, value)) : '';
   $('#detailBody').replaceChildren(
     el('h2', { class: 'dtitle', style: `--c:${colorOf(ev)}` }, ev.title),
     yearsLabel(ev, o.date) ? el('div', { class: 'dsub' }, yearsLabel(ev, o.date).replace(/^./, c => c.toUpperCase())) : '',
-    row('When', `${when} · ${time}`),
+    row('When', (() => {
+      if (!(o.span > 0)) return `${when} · ${time}`;
+      const fmt = d => d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+      const sd = parse(o.startDate), ed = addDays(sd, o.span), tag = o.zoneTag ? ' ' + o.zoneTag : '';
+      return `${fmt(sd)}${!ev.all_day && ev.start_time ? ' ' + fmtTime(ev.start_time) + tag : ''} → ${fmt(ed)}${!ev.all_day && ev.end_time ? ' ' + fmtTime(ev.end_time) + tag : ''} (${o.span + 1} days)`;
+    })()),
     row('Who', ev.who.length ? ev.who.map(w => el('span', { class: 'dwho' }, el('span', { class: 'dot', style: `--c:${(member(w) || {}).color}` }), (member(w) || {}).name || '?')) : ''),
     row('Where', ev.location),
     row('Repeats', repeatText ? `${repeatText.replace('Repeats ', '')}${ev.repeat_until ? ' until ' + parse(ev.repeat_until).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : ''} · edits change the whole series` : ''),
     row('Reminders', mins.length ? mins.map(m => (REMIND_OPTS.find(r => r[0] === m) || [m, m + ' min'])[1] + (m ? ' before' : '')).join(', ') : ''),
     row('Notes', ev.notes));
   $('#detailEdit').onclick = () => { d.close(); openEvent(ev, o.date); };
+  $('#detailDup').onclick = () => { d.close(); openEvent(null, null, duplicatePrefill(o)); };
   d.showModal();
 }
 $('#detailClose').onclick = () => $('#detailDlg').close();
@@ -414,9 +495,10 @@ function openEvent(ev, dateHint, prefill) {
   f.start_time.value = ev && ev.start_time || '09:00';
   f.end_time.value = ev && ev.end_time || '10:00';
   f.location.value = ev ? ev.location : '';
-  f.repeat.value = ev ? ev.repeat : 'none';
+  setRepeatChoice(ev ? (ev.repeat === 'weekly' && ev.repeat_every > 1 ? `weekly:${ev.repeat_every}` : ev.repeat) : 'none');
   f.repeat_until.value = ev && ev.repeat_until || '';
   f.show_years.checked = ev ? !!ev.show_years : false;
+  f.end_date.value = ev ? ev.end_date || '' : '';
   f.notes.value = ev ? ev.notes : '';
   // Quick add / link pre-fill: only fills the form. Nothing is saved until the person presses Save.
   const note = $('#prefillNote');
@@ -429,16 +511,19 @@ function openEvent(ev, dateHint, prefill) {
     if (prefill.start_time) f.start_time.value = prefill.start_time;
     if (prefill.end_time) f.end_time.value = prefill.end_time;
     if (prefill.location) f.location.value = prefill.location;
-    if (prefill.repeat) f.repeat.value = prefill.repeat;
+    if (prefill.repeat_until) f.repeat_until.value = prefill.repeat_until;
+    if (prefill.end_date) f.end_date.value = prefill.end_date;
+    if (prefill.repeat) setRepeatChoice(prefill.repeat === 'weekly' && prefill.repeat_every > 1 ? `weekly:${prefill.repeat_every}` : prefill.repeat);
     if (prefill.show_years) f.show_years.checked = true;
     if (prefill.notes) f.notes.value = prefill.notes;
   }
-  selWho = new Set(ev ? ev.who : [db.me]);
-  selRemind = new Set(ev ? (ev.reminders[db.me] || []) : me().defaultReminders);
+  selWho = new Set(ev ? ev.who : prefill && prefill.who ? prefill.who : [db.me]);
+  selRemind = new Set(ev ? (ev.reminders[db.me] || []) : prefill && prefill.remind ? prefill.remind : me().defaultReminders);
+  selDays = new Set(ev ? ev.weekdays || [] : prefill && prefill.weekdays || []);
   pillSet($('#whoBox'), db.members.map(m => [m.id, m.name]), selWho, id => member(id).color);
   pillSet($('#remindBox'), REMIND_OPTS, selRemind);
   $('#remindWho').textContent = `(for ${me().name})`;
-  fillTzSelect(f.tz, ev && ev.tz || myTz(), false);
+  fillTzSelect(f.tz, ev && ev.tz || prefill && prefill.tz || myTz(), false);
   syncTimeFields();
   dlg.showModal();
 }
@@ -461,16 +546,54 @@ function updateTzHint() {
   if (a.date !== f.date.value) txt += ` (${parse(a.date).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })})`;
   hint.textContent = `= ${txt} for you (${tzLabel(vz)})`;
 }
+// The Repeats menu values are 'none' | 'daily' | 'weekly' | 'weekly:N' | 'monthly' | 'yearly'.
+function setRepeatChoice(value) {
+  const sel = form.elements.repeat;
+  if (![...sel.options].some(o => o.value === value)) { // an interval saved some other way: show it rather than hide it
+    const n = value.split(':')[1];
+    sel.append(el('option', { value }, `Every ${n} weeks`));
+  }
+  sel.value = value;
+}
+// "Repeat on" day pills, for weekly repeats. The start date's own weekday is always part of the pattern (and locked),
+// so the series always begins on the date that was picked.
+function syncDays() {
+  const rep = form.elements.repeat.value, row = $('#daysRow');
+  // Not offered together with an end date: a multi-day stay repeats as a whole ("every other weekend"), not per chosen day.
+  row.hidden = !(rep === 'weekly' || rep.startsWith('weekly:')) || !!form.elements.end_date.value;
+  if (row.hidden) return;
+  const dateStr = form.elements.date.value, dow = dateStr ? parse(dateStr).getDay() : -1;
+  if (dow >= 0) selDays.add(dow);
+  $('#daysBox').replaceChildren(...DOW.map((name, d) => {
+    const locked = d === dow;
+    const p = el('span', { class: 'pill' + (selDays.has(d) ? ' on' : '') + (locked ? ' locked' : ''), title: locked ? "The start date's weekday" : '' }, name);
+    if (!locked) p.onclick = () => { selDays.has(d) ? selDays.delete(d) : selDays.add(d); p.classList.toggle('on'); };
+    return p;
+  }));
+}
 function syncYears() { $('#yearsRow').hidden = form.elements.repeat.value !== 'yearly'; }
-form.elements.repeat.onchange = syncYears;
+form.elements.repeat.onchange = () => { syncYears(); syncDays(); };
+// When the start date moves, the end date moves with it so a 3-day event stays 3 days. The end can never be before the start.
+let lastDateValue = '';
+function onDateChanged() {
+  const f = form.elements, d = f.date.value;
+  if (d && f.end_date.value && lastDateValue) {
+    const span = Math.round((parse(f.end_date.value) - parse(lastDateValue)) / 864e5);
+    if (span >= 0) f.end_date.value = ymd(addDays(parse(d), span));
+  }
+  if (d) lastDateValue = d;
+  f.end_date.min = d || '';
+}
 function syncTimeFields() {
+  lastDateValue = form.elements.date.value; form.elements.end_date.min = lastDateValue;
   syncYears();
+  syncDays();
   const hide = form.elements.all_day.checked ? 'none' : '';
   $('#timeRow').style.display = hide; $('#tzRow').style.display = hide;
   updateTzHint();
 }
 form.elements.all_day.onchange = syncTimeFields;
-form.addEventListener('input', updateTzHint);
+form.addEventListener('input', e => { updateTzHint(); if (e.target.name === 'date') { onDateChanged(); syncDays(); } if (e.target.name === 'end_date') syncDays(); });
 // + opens a small menu (not the form directly), so adding is always a deliberate two-step act.
 $('#fab').onclick = () => $('#addMenu').showModal();
 $('#addCancel').onclick = () => $('#addMenu').close();
@@ -494,7 +617,7 @@ let chronoLoading = null;
 function loadChrono() {
   if (window.chrono) return Promise.resolve();
   return chronoLoading ||= new Promise((resolve, reject) => {
-    const s = el('script', { src: 'vendor/chrono-2.5.0.js?v=17' });
+    const s = el('script', { src: 'vendor/chrono-2.5.0.js?v=20' });
     s.onload = resolve;
     s.onerror = () => { chronoLoading = null; reject(new Error('chrono failed to load')); };
     document.head.append(s);
@@ -506,6 +629,9 @@ async function runQuick(text) {
   const warn = [];
   if (!r.found.date) warn.push('No date found, so today is filled in.');
   if (!r.found.time) warn.push('No time found, so this is set to all day.');
+  if (r.end_date) warn.push(`Runs through ${parse(r.end_date).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}.`);
+  if (r.weekdays) warn.push(`Set to repeat ${r.repeat_every > 1 ? `every ${r.repeat_every} weeks ` : ''}on ${daysLabel(r.weekdays)}.`);
+  else if (r.repeat === 'weekly') warn.push(r.repeat_every > 1 ? `Set to repeat every ${r.repeat_every} weeks.` : 'Set to repeat weekly.');
   if (r.repeat === 'yearly') warn.push(r.show_years ? 'Set to repeat every year and count the years.' : 'Set to repeat every year.');
   openEvent(null, null, { ...r, note: 'Filled in from your text. ' + (warn.join(' ') || 'Check the date and time before saving.') });
 }
@@ -542,10 +668,20 @@ form.onsubmit = e => {
   Object.assign(ev, {
     title: f.title.value.trim(), date: f.date.value, all_day: f.all_day.checked,
     start_time: f.all_day.checked ? '' : f.start_time.value, end_time: f.all_day.checked ? '' : f.end_time.value,
-    location: f.location.value.trim(), repeat: f.repeat.value, repeat_until: f.repeat_until.value,
+    location: f.location.value.trim(), repeat: f.repeat.value.split(':')[0], repeat_until: f.repeat_until.value,
     notes: f.notes.value.trim(), who: [...selWho], tz: f.tz.value,
   });
   // Only ever send show_years once it's in play (ticked, or already stored), so saving works before the database column exists.
+  // Same tolerance as show_years: only send repeat_every once it matters (above 1) or the column is known to exist.
+  const every = f.repeat.value.startsWith('weekly:') ? +f.repeat.value.split(':')[1] : 1;
+  if (every > 1 || ev.repeat_every !== undefined) ev.repeat_every = every;
+  const endDate = f.end_date.value && f.end_date.value > f.date.value ? f.end_date.value : '';
+  if (f.end_date.value && !endDate && f.end_date.value < f.date.value) toast('The end date was before the start, so it was ignored.');
+  if (endDate || ev.end_date !== undefined) ev.end_date = endDate; // same tolerance as the columns above
+  const weeklyRepeat = f.repeat.value === 'weekly' || f.repeat.value.startsWith('weekly:');
+  if (weeklyRepeat) selDays.add(parse(f.date.value).getDay());
+  const days = weeklyRepeat && !endDate && selDays.size > 1 ? [...selDays].sort((a, b) => a - b) : null; // one day = just the start date's weekday
+  if (days || ev.weekdays !== undefined) ev.weekdays = days; // same tolerance as the columns above
   const wantYears = f.repeat.value === 'yearly' && f.show_years.checked;
   if (wantYears || ev.show_years !== undefined) ev.show_years = wantYears;
   ev.reminders[db.me] = [...selRemind].sort((a, b) => a - b);
@@ -624,7 +760,7 @@ async function syncPushDevice(userId) {
   try { const sub = await currentSub(); if (sub && Notification.permission === 'granted') await saveSub(sub, userId); }
   catch (e) { console.error(e); }
 }
-const APP_BUILD = 'v17';
+const APP_BUILD = 'v20';
 // One line of plain-text device state, so "it doesn't work" can be diagnosed without guessing.
 async function showPushDiag() {
   const parts = [`build ${APP_BUILD}`, `Home Screen app: ${isStandalone() ? 'yes' : 'no'}`];

@@ -36,6 +36,9 @@ create table public.events (
   repeat       text not null default 'none' check (repeat in ('none','daily','weekly','monthly','yearly')),
   repeat_until date,
   tz           text,                           -- zone the time was entered in; null = no conversion
+  repeat_every int not null default 1 check (repeat_every between 1 and 52), -- weekly events: every N weeks (rotating schedules)
+  end_date     date check (end_date is null or end_date >= date), -- multi-day events: last day (inclusive); null = one day
+  weekdays     int[] check (weekdays is null or weekdays <@ array[0,1,2,3,4,5,6]), -- weekly events on several days: 0=Sun..6=Sat; null = just the start date's weekday
   show_years   boolean not null default false, -- yearly events: show "turns 36" / "5th anniversary" (date = the real start date)
   created_by   uuid references public.members on delete set null,
   deleted_at   timestamptz,                           -- soft delete: set instead of removing the row
