@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Family Calendar</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<meta name="theme-color" content="#2b6cb0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Family">
+<link rel="stylesheet" href="style.css?v=17">
+</head>
+<body>
+<header class="top">
+  <button id="prev" aria-label="Previous">‹</button>
+  <button id="today">Today</button>
+  <button id="next" aria-label="Next">›</button>
+  <h1 id="title" role="button" tabindex="0" aria-label="Jump to a date"></h1>
+  <button id="menuBtn" aria-label="Settings">⚙︎</button>
+</header>
+
+<nav class="tabs">
+  <button data-view="month" class="on">Month</button>
+  <button data-view="week">Week</button>
+  <button data-view="agenda">Agenda</button>
+</nav>
+<div id="chips" class="chips"></div>
+
+<main id="main"></main>
+<p id="motd" class="motd" aria-live="polite"></p>
+
+<button id="fab" aria-label="Add event">+</button>
+
+<dialog id="jumpDlg">
+  <form id="jumpForm">
+    <h2>Jump to date</h2>
+    <label>Date <input type="date" id="jumpDate" required></label>
+    <div class="actions"><span class="spacer"></span><button type="button" id="jumpCancel">Cancel</button><button type="submit" class="primary">Go</button></div>
+  </form>
+</dialog>
+
+<dialog id="addMenu">
+  <h2>Add</h2>
+  <button type="button" id="addNew" class="big">New event</button>
+  <button type="button" id="addQuick" class="big">Quick add from text</button>
+  <div class="actions"><span class="spacer"></span><button type="button" id="addCancel">Cancel</button></div>
+</dialog>
+
+<dialog id="quickDlg">
+  <form id="quickForm">
+    <h2>Quick add</h2>
+    <label>Paste a message, or type something like “Dentist Thursday at 2pm”
+      <textarea id="quickText" rows="4"></textarea></label>
+    <button type="button" id="quickPaste">Paste from clipboard</button>
+    <p id="quickErr" class="err" role="alert"></p>
+    <small>You'll get to check and change everything before anything is saved.</small>
+    <div class="actions"><span class="spacer"></span><button type="button" id="quickCancel">Cancel</button><button type="submit" class="primary">Read it</button></div>
+  </form>
+</dialog>
+
+<dialog id="detailDlg">
+  <div id="detailBody"></div>
+  <div class="actions">
+    <button type="button" id="detailEdit">Edit</button>
+    <span class="spacer"></span>
+    <button type="button" id="detailClose" class="primary">Close</button>
+  </div>
+</dialog>
+
+<dialog id="eventDlg">
+  <form method="dialog" id="eventForm">
+    <h2 id="dlgTitle">New event</h2>
+    <p id="prefillNote" class="prefill" hidden></p>
+    <label>Title <input name="title" required autocomplete="off"></label>
+    <div class="row">
+      <label>Date <input type="date" name="date" required></label>
+      <label class="check"><input type="checkbox" name="all_day"> All day</label>
+    </div>
+    <div class="row" id="timeRow">
+      <label>Start <input type="time" name="start_time" value="09:00"></label>
+      <label>End <input type="time" name="end_time" value="10:00"></label>
+    </div>
+    <label id="tzRow">Time zone <select name="tz"></select></label>
+    <small id="tzHint"></small>
+    <fieldset><legend>Who's involved</legend><div id="whoBox" class="pills"></div></fieldset>
+    <label>Location <input name="location" autocomplete="off"></label>
+    <div class="row">
+      <label>Repeats
+        <select name="repeat">
+          <option value="none">Never</option>
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+          <option value="yearly">Yearly</option>
+        </select>
+      </label>
+      <label>Until <input type="date" name="repeat_until"></label>
+    </div>
+    <label class="check" id="yearsRow" hidden><input type="checkbox" name="show_years"> Count the years (shows "turns 36"). Set the Date above to the real birth or start date, including the year.</label>
+    <fieldset><legend>Remind me <small id="remindWho"></small></legend><div id="remindBox" class="pills"></div></fieldset>
+    <label>Notes <textarea name="notes" rows="2"></textarea></label>
+    <div class="actions">
+      <button type="button" id="delBtn" class="danger">Delete</button>
+      <span class="spacer"></span>
+      <button type="button" id="cancelBtn">Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="menuDlg">
+  <h2>Settings</h2>
+  <section>
+    <h3>Signed in as <span id="meName"></span></h3>
+    <button id="inviteBtn">Invite someone</button>
+    <div id="inviteOut" hidden>
+      <input id="inviteLink" readonly>
+      <button id="copyInvite">Copy</button>
+      <small>Single-use, expires in 7 days.</small>
+    </div>
+    <button id="signOut">Sign out</button>
+  </section>
+  <section>
+    <h3>My time zone</h3>
+    <select id="myTz"></select>
+    <small>Everyone's events are shown in this zone.</small>
+  </section>
+  <section>
+    <h3>Time display</h3>
+    <select id="timeFmt"><option value="12">12-hour (1:00pm)</option><option value="24">24-hour (13:00)</option></select>
+    <small>Affects lists and the agenda. The time entry box follows your device's own setting.</small>
+  </section>
+  <section>
+    <h3>Message of the day</h3>
+    <label class="check"><input type="checkbox" id="spicyBox"> Spicy messages 🌶️</label>
+    <small>Off by default. Only affects this device — flip it off before handing the phone to someone small.</small>
+  </section>
+  <section>
+    <h3>Notifications</h3>
+    <p id="pushStatus" class="note"></p>
+    <p id="pushDiag" class="note diag"></p>
+    <button id="pushOn">Turn on for this device</button>
+    <button id="pushTest" hidden>Send a test</button>
+    <small>Each device (phone, laptop) is turned on separately.</small>
+  </section>
+  <section>
+    <h3>My default reminders</h3>
+    <div id="defaultRemind" class="pills"></div>
+    <small>Pre-checked when you create new events.</small>
+  </section>
+  <section>
+    <h3>People</h3>
+    <div id="peopleList"></div>
+    <button id="addPerson">+ Add person</button>
+  </section>
+  <section>
+    <h3>Data</h3>
+    <button id="exportBtn">Export everything (JSON)</button>
+    <button id="trashBtn">Trash (<span id="trashCount">0</span>)</button>
+    <div id="trashList"></div>
+  </section>
+  <div class="actions"><span class="spacer"></span><button id="closeMenu" class="primary">Done</button></div>
+</dialog>
+
+<div id="gate" hidden></div>
+<div id="toast" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js?v=17"></script>
+<script src="motd.js?v=17"></script>
+<script src="quickadd.js?v=17"></script>
+<script src="app.js?v=17"></script>
+</body>
+</html>

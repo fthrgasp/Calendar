@@ -1,0 +1,164 @@
+// @ts-nocheck
+// Supabase Edge Function: sends web-push reminders. Called every minute by pg_cron (see migrations/004_push_schedule.sql),
+// and by the app's "Send test notification" button ({"test": true} + the user's login token).
+//
+// Secrets (Edge Functions > Secrets): VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT, CRON_SECRET.
+// SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided automatically. Turn OFF "Verify JWT" for this
+// function: the cron call has no login token, so the function checks CRON_SECRET itself.
+import { createClient } from 'npm:@supabase/supabase-js@2';
+import webpush from 'npm:web-push@3.6.7';
+
+// <core> — pure logic (no network); unit-tested locally in node
+const DAY = 864e5;
+const parseD = s => { const [y, m, d] = s.split('-').map(Number); return Date.UTC(y, m - 1, d); };
+const fmtD = ms => new Date(ms).toISOString().slice(0, 10);
+
+function tzParts(ms, tz) {
+  const f = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return Object.fromEntries(f.formatToParts(ms).map(p => [p.type, p.value]));
+}
+function tzOffsetMs(ms, tz) {
+  const p = tzParts(ms, tz);
+  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - ms;
+}
+function wallToMs(dateStr, timeStr, tz) { // wall-clock time in `tz` -> UTC ms (handles DST)
+  const [y, m, d] = dateStr.split('-').map(Number), [hh, mm] = timeStr.split(':').map(Number);
+  const guess = Date.UTC(y, m - 1, d, hh, mm);
+  return guess - tzOffsetMs(guess - tzOffsetMs(guess, tz), tz);
+}
+
+// Dates (YYYY-MM-DD, in the event's own wall calendar) on which an event occurs within [fromMs, toMs] (UTC midnights).
+function occurrenceDates(ev, fromMs, toMs) {
+  const start = parseD(ev.date), until = ev.repeat_until ? parseD(ev.repeat_until) : null, out = [];
+  if (!ev.repeat || ev.repeat === 'none') {
+    if (start >= fromMs && start <= toMs) out.push(fmtD(start));
+    return out;
+  }
+  const s = new Date(start);
+  for (let i = 0; i < 5000; i++) {
+    let d;
+    if (ev.repeat === 'daily') d = start + i * DAY;
+    else if (ev.repeat === 'weekly') d = start + 7 * i * DAY;
+    else if (ev.repeat === 'yearly') { // a Feb 29 date falls on Feb 28 in non-leap years
+      d = Date.UTC(s.getUTCFullYear() + i, s.getUTCMonth(), s.getUTCDate());
+      if (new Date(d).getUTCMonth() !== s.getUTCMonth()) d = Date.UTC(s.getUTCFullYear() + i, s.getUTCMonth() + 1, 0);
+    } else { // monthly: months lacking that day-of-month are skipped, matching the app
+      d = Date.UTC(s.getUTCFullYear(), s.getUTCMonth() + i, s.getUTCDate());
+      if (new Date(d).getUTCDate() !== s.getUTCDate()) { if (d > toMs) break; continue; }
+    }
+    if (d > toMs || (until !== null && d > until)) break;
+    if (d >= fromMs) out.push(fmtD(d));
+  }
+  return out;
+}
+
+// All-day events anchor to 9:00 in the device's zone; timed events use their own zone (falling back to the device's).
+function startInstant(ev, dateStr, deviceTz) {
+  const allDay = ev.all_day || !ev.start_time;
+  const tz = allDay ? deviceTz : (ev.tz || deviceTz);
+  return wallToMs(dateStr, allDay ? '09:00' : ev.start_time.slice(0, 5), tz);
+}
+
+// Which reminders should fire now? A reminder is due if its fire time is within the last `windowMs`.
+// People involved in an event but with no saved reminder row fall back to their default reminders.
+function computeDue({ events, eventMembers, reminders, members, subs, now, windowMs }) {
+  const memberById = Object.fromEntries(members.map(m => [m.id, m]));
+  const deviceTz = {};
+  for (const s of subs) if (!deviceTz[s.user_id]) deviceTz[s.user_id] = s.tz || 'UTC';
+  const remRow = {}, involved = {};
+  for (const r of reminders) remRow[r.event_id + '|' + r.member_id] = r.minutes;
+  for (const em of eventMembers) (involved[em.event_id] ||= new Set()).add(em.member_id);
+  for (const r of reminders) (involved[r.event_id] ||= new Set()).add(r.member_id);
+  const today = parseD(fmtD(now)), from = today - 3 * DAY, to = today + 10 * DAY;
+  const out = [];
+  for (const ev of events) {
+    const people = involved[ev.id];
+    if (!people) continue;
+    const dates = occurrenceDates(ev, from, to);
+    for (const mid of people) {
+      const m = memberById[mid];
+      if (!m || !m.user_id || !deviceTz[m.user_id]) continue; // nobody to notify
+      const minutesList = remRow[ev.id + '|' + mid] ?? m.default_reminders ?? [];
+      for (const date of dates) {
+        const occ = startInstant(ev, date, deviceTz[m.user_id]);
+        for (const minutes of minutesList) {
+          const fire = occ - minutes * 60000;
+          if (fire <= now && fire > now - windowMs) out.push({ ev, member: m, minutes, occ, date, tz: deviceTz[m.user_id] });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function describe(d) {
+  const { ev, minutes, occ, tz, member } = d;
+  const lead = minutes === 0 ? 'Starting now'
+    : minutes < 60 ? `In ${minutes} min`
+    : minutes < 1440 ? `In ${minutes / 60} hour${minutes === 60 ? '' : 's'}`
+    : `In ${minutes / 1440} day${minutes === 1440 ? '' : 's'}`;
+  const allDay = ev.all_day || !ev.start_time;
+  const when = allDay
+    ? 'All day, ' + new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short', month: 'short', day: 'numeric' }).format(occ)
+    : new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit', hourCycle: member.time_format === '24' ? 'h23' : 'h12' }).format(occ).toLowerCase().replace(' ', '');
+  return { title: ev.title, body: [lead, when, ev.location].filter(Boolean).join(' · '), tag: `${ev.id}-${d.date}-${minutes}` };
+}
+// </core>
+
+// CORS: without these headers the browser hides the reply from the app (the test button would look like it failed).
+const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type' };
+const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
+
+async function pushTo(sb, subs, payload) {
+  let sent = 0;
+  await Promise.all(subs.map(async s => {
+    try {
+      await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, JSON.stringify(payload));
+      sent++;
+    } catch (e) {
+      if (e.statusCode === 404 || e.statusCode === 410) await sb.from('push_subscriptions').delete().eq('id', s.id); // device unsubscribed
+      else console.error('push failed', e.statusCode, e.body);
+    }
+  }));
+  return sent;
+}
+
+Deno.serve(async req => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
+  const sb = createClient(Deno.env.get('SUPABASE_URL'), Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'));
+  webpush.setVapidDetails(Deno.env.get('VAPID_SUBJECT') || 'mailto:admin@example.com', Deno.env.get('VAPID_PUBLIC_KEY'), Deno.env.get('VAPID_PRIVATE_KEY'));
+  const body = await req.json().catch(() => ({}));
+
+  // --- test button: the signed-in user sends a notification to their own devices ---
+  if (body.test) {
+    const jwt = (req.headers.get('authorization') || '').replace(/^Bearer /i, '');
+    const { data: { user } } = await sb.auth.getUser(jwt);
+    if (!user) return json({ error: 'not signed in' }, 401);
+    const { data: subs } = await sb.from('push_subscriptions').select('*').eq('user_id', user.id);
+    const sent = await pushTo(sb, subs || [], { title: 'Notifications are working 🎉', body: 'Reminders from the family calendar will show up like this.', tag: 'test' });
+    return json({ devices: (subs || []).length, sent });
+  }
+
+  // --- scheduled run ---
+  if (req.headers.get('x-cron-secret') !== Deno.env.get('CRON_SECRET')) return json({ error: 'forbidden' }, 403);
+  const now = Date.now(), today = fmtD(now);
+  const q = t => sb.from(t).select('*');
+  const [events, eventMembers, reminders, members, subs] = await Promise.all([
+    q('events').is('deleted_at', null).or(`repeat.neq.none,and(date.gte.${fmtD(now - 3 * DAY)},date.lte.${fmtD(now + 10 * DAY)})`),
+    q('event_members'), q('reminders'), q('members'), q('push_subscriptions'),
+  ]);
+  for (const r of [events, eventMembers, reminders, members, subs]) if (r.error) return json({ error: r.error.message }, 500);
+
+  const due = computeDue({ events: events.data, eventMembers: eventMembers.data, reminders: reminders.data, members: members.data, subs: subs.data, now, windowMs: 5 * 60000 });
+  let delivered = 0;
+  for (const d of due) {
+    // claim it first so overlapping runs can't double-send
+    const { data: claimed } = await sb.from('sent_reminders')
+      .upsert({ event_id: d.ev.id, member_id: d.member.id, occ_start: new Date(d.occ).toISOString(), minutes: d.minutes },
+        { onConflict: 'event_id,member_id,occ_start,minutes', ignoreDuplicates: true }).select();
+    if (!claimed || !claimed.length) continue;
+    delivered += await pushTo(sb, subs.data.filter(s => s.user_id === d.member.user_id), describe(d));
+  }
+  await sb.from('sent_reminders').delete().lt('sent_at', new Date(now - 14 * DAY).toISOString()); // tidy up
+  return json({ due: due.length, delivered });
+});

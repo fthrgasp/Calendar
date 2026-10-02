@@ -1,0 +1,10 @@
+# Private values: never commit these
+secrets/
+calendar-backup.sh
+*.log
+
+# Build output and local clutter
+*.zip
+calendar-deploy*
+.DS_Store
+.claude/
