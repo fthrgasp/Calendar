@@ -1,4 +1,4 @@
-// Family Calendar — shared via Supabase. Data lives on the server; the browser only caches `db` in memory.
+// Trying My Best (family calendar) — shared via Supabase. Data lives on the server; the browser only caches `db` in memory.
 'use strict';
 
 const REMIND_OPTS = [
@@ -617,7 +617,7 @@ let chronoLoading = null;
 function loadChrono() {
   if (window.chrono) return Promise.resolve();
   return chronoLoading ||= new Promise((resolve, reject) => {
-    const s = el('script', { src: 'vendor/chrono-2.5.0.js?v=20' });
+    const s = el('script', { src: 'vendor/chrono-2.5.0.js?v=22' });
     s.onload = resolve;
     s.onerror = () => { chronoLoading = null; reject(new Error('chrono failed to load')); };
     document.head.append(s);
@@ -760,7 +760,7 @@ async function syncPushDevice(userId) {
   try { const sub = await currentSub(); if (sub && Notification.permission === 'granted') await saveSub(sub, userId); }
   catch (e) { console.error(e); }
 }
-const APP_BUILD = 'v20';
+const APP_BUILD = 'v22';
 // One line of plain-text device state, so "it doesn't work" can be diagnosed without guessing.
 async function showPushDiag() {
   const parts = [`build ${APP_BUILD}`, `Home Screen app: ${isStandalone() ? 'yes' : 'no'}`];
@@ -853,7 +853,7 @@ $('#inviteBtn').onclick = async () => {
     const code = await run(sb.rpc('create_invite', { fid: db.familyId }));
     $('#inviteLink').value = `${location.origin}${location.pathname}?invite=${code}`;
     $('#inviteOut').hidden = false;
-    if (navigator.share) navigator.share({ title: 'Join our family calendar', url: $('#inviteLink').value }).catch(() => {});
+    if (navigator.share) navigator.share({ title: 'Join us on Trying My Best', url: $('#inviteLink').value }).catch(() => {});
   } catch (e) { console.error(e); toast('Could not create invite.'); }
 };
 $('#copyInvite').onclick = async () => {
@@ -891,7 +891,7 @@ function showLogin(mode = 'signin', email = '') {
     err,
     el('button', { class: 'primary', type: 'submit' }, creating ? 'Create account' : 'Sign in'));
   showGate(
-    el('h1', {}, 'Family Calendar'),
+    el('h1', {}, 'Trying My Best'),
     el('p', {}, invited ? "You've been invited! Create an account (or sign in) to join." : creating ? 'Create your account.' : 'Sign in to see the family calendar.'),
     f,
     el('p', { class: 'alt' }, el('button', { class: 'link', onclick: () => showLogin(creating ? 'signin' : 'signup', emailIn.value) },

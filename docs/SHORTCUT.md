@@ -1,17 +1,17 @@
-# Add to Family Calendar: iPhone Share Sheet shortcut
+# Add to Trying My Best: iPhone Share Sheet shortcut
 
-Lets you select text in Messages (or anywhere), tap Share, pick **Add to Family Calendar**, and land on the new-event form already filled in.
+Lets you select text in Messages (or anywhere), tap Share, pick **Add to Trying My Best**, and land on the new-event form already filled in.
 The app does the date reading; the Shortcut only has to hand it the text.
 
 ## Build it (about 3 minutes)
 
-1. Open the **Shortcuts** app, tap **+**, and name it **Add to Family Calendar**.
+1. Open the **Shortcuts** app, tap **+**, and name it **Add to Trying My Best**.
 2. Tap the **ⓘ** (details) button and turn on **Show in Share Sheet**. Under *Share Sheet Types*, leave only **Text** selected.
 3. Add the action **URL Encode** (search "encode"). Set its input to **Shortcut Input**.
 4. Add the action **Text** and type `https://cal.tryingmybest.org/?quick=` then tap the variable picker and insert the **URL Encoded Text** result from step 3 right after the `=`.
 5. Add the action **Open URLs** and set its input to the Text from step 4.
 
-Use it: in Messages, long-press a message, choose **More**, tap the bubble, then tap the **Share** arrow and pick **Add to Family Calendar**. (In other apps, select the text and tap **Share**.)
+Use it: in Messages, long-press a message, choose **More**, tap the bubble, then tap the **Share** arrow and pick **Add to Trying My Best**. (In other apps, select the text and tap **Share**.)
 
 ## Know before you build
 - **It opens in Safari, not your Home Screen icon.** iPhone has no way to send a link into an installed web app. The form works the same, and events save to the same shared calendar. The first time, sign in once in Safari; it remembers you after that.

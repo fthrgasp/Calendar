@@ -1,4 +1,4 @@
-# Family Calendar
+# Trying My Best (the family calendar)
 
 A shared family calendar as an installable web app (PWA). Plain HTML/CSS/JS, no build step.
 Live at https://cal.tryingmybest.org (Spaceship cPanel hosting). Backend: Supabase (login, Postgres with row-level security, scheduled reminders).
@@ -14,6 +14,7 @@ message of the day with a per-device "spicy" switch (`motd.js`: add your own lin
 - `config.js` — Supabase URL + publishable key (public by design; access is enforced by RLS).
 - `schema.sql` — full database for a fresh Supabase project. `migrations/` — incremental SQL for the existing project, applied in order (001–010).
 - `supabase/functions/send-reminders/` — the reminder/push function. `scripts/` — `build_zip.sh`, `backup.sh`, `backup_to_sql.py` (restore).
+- `icons/` — Home Screen icons, generated from `source-puffin-transparent.webp` by `python3 scripts/make_icons.py "#1C3D54"` (any tile color).
 - `secrets/` — **never committed.** VAPID keys, CRON_SECRET, backup password, and "READY" SQL/scripts with secrets filled in.
 
 ## Deploying an update
