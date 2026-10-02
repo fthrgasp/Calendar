@@ -163,3 +163,24 @@ end $$;
 
 revoke all on function public.create_family, public.create_invite, public.join_family from public, anon;
 grant execute on function public.create_family, public.create_invite, public.join_family to authenticated;
+
+-- Private calendar-feed link (Google/Apple Calendar subscribe to it). The token is the only credential; regenerate any time.
+create table public.feed_tokens (
+  family_id  uuid primary key references public.families on delete cascade,
+  token      text not null unique,
+  created_at timestamptz not null default now()
+);
+alter table public.feed_tokens enable row level security;
+create policy "family reads feed token" on public.feed_tokens for select using (family_id in (select public.my_family_ids()));
+create function public.rotate_feed_token() returns text
+language plpgsql security definer set search_path = public as $$
+declare fid uuid; t text;
+begin
+  select family_id into fid from members where user_id = auth.uid() limit 1;
+  if fid is null then raise exception 'not in a family'; end if;
+  t := replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '');
+  insert into feed_tokens (family_id, token) values (fid, t) on conflict (family_id) do update set token = excluded.token, created_at = now();
+  return t;
+end $$;
+revoke all on function public.rotate_feed_token() from public, anon;
+grant execute on function public.rotate_feed_token() to authenticated;

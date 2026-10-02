@@ -617,7 +617,7 @@ let chronoLoading = null;
 function loadChrono() {
   if (window.chrono) return Promise.resolve();
   return chronoLoading ||= new Promise((resolve, reject) => {
-    const s = el('script', { src: 'vendor/chrono-2.5.0.js?v=22' });
+    const s = el('script', { src: 'vendor/chrono-2.5.0.js?v=24' });
     s.onload = resolve;
     s.onerror = () => { chronoLoading = null; reject(new Error('chrono failed to load')); };
     document.head.append(s);
@@ -736,8 +736,31 @@ function renderMenu() {
   $('#trashList').hidden = true;
   $('#inviteOut').hidden = true;
   renderPushStatus();
+  renderFeed();
 }
 $('#menuBtn').onclick = () => { renderMenu(); menu.showModal(); };
+
+// ---------- calendar feed (Google / Apple Calendar subscription) ----------
+const feedUrl = token => `${FAMCAL_CONFIG.url}/functions/v1/calendar-feed/trying-my-best.ics?t=${token}`;
+function showFeed(token) {
+  $('#feedOut').hidden = !token; $('#feedMake').hidden = !!token; $('#feedNew').hidden = !token;
+  if (token) $('#feedLink').value = feedUrl(token);
+}
+async function renderFeed() {
+  $('#feedNote').textContent = '';
+  try { const rows = await run(sb.from('feed_tokens').select('token').limit(1)); showFeed(rows[0] && rows[0].token); }
+  catch (e) { console.error(e); showFeed(null); $('#feedNote').textContent = "The feed isn't set up in the database yet."; }
+}
+async function makeFeedLink() {
+  try { showFeed(await run(sb.rpc('rotate_feed_token'))); $('#feedNote').textContent = 'In Google Calendar: Other calendars (+) → From URL → paste the link.'; }
+  catch (e) { console.error(e); toast("Couldn't create the link."); }
+}
+$('#feedMake').onclick = makeFeedLink;
+$('#feedNew').onclick = () => { if (confirm('Make a new link? The old one stops working right away, so you will need to subscribe again with the new one.')) makeFeedLink(); };
+$('#feedCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText($('#feedLink').value); toast('Link copied'); }
+  catch { $('#feedLink').select(); }
+};
 
 // ---------- push notifications ----------
 const b64ToBytes = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(s.length / 4) * 4, '=')), c => c.charCodeAt(0));
@@ -760,7 +783,7 @@ async function syncPushDevice(userId) {
   try { const sub = await currentSub(); if (sub && Notification.permission === 'granted') await saveSub(sub, userId); }
   catch (e) { console.error(e); }
 }
-const APP_BUILD = 'v22';
+const APP_BUILD = 'v24';
 // One line of plain-text device state, so "it doesn't work" can be diagnosed without guessing.
 async function showPushDiag() {
   const parts = [`build ${APP_BUILD}`, `Home Screen app: ${isStandalone() ? 'yes' : 'no'}`];

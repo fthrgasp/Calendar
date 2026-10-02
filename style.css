@@ -116,3 +116,10 @@ section button { margin: 4px 4px 4px 0; }
 
 .ev-mini.cont { border-left-style: dashed; opacity: .9; }
 #endDateRow small { color: var(--muted); }
+
+/* An element marked hidden must stay hidden even when its own CSS sets a display (the invite box used to leak through). */
+[hidden] { display: none !important; }
+
+#feedOut { display: flex; gap: 6px; align-items: center; margin: 6px 0; }
+#feedOut input { flex: 1; min-width: 0; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font-size: .8rem; }
+#feedNote { display: block; margin-top: 4px; }
