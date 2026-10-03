@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Trying My Best</title>
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="apple-touch-icon" href="icons/icon-180.png?v=25">
-<link rel="icon" type="image/png" href="icons/icon-192.png?v=25">
+<link rel="apple-touch-icon" href="icons/icon-180.png?v=27">
+<link rel="icon" type="image/png" href="icons/icon-192.png?v=27">
 <meta name="theme-color" content="#2b6cb0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Trying My Best">
-<link rel="stylesheet" href="style.css?v=25">
+<link rel="stylesheet" href="style.css?v=27">
 </head>
 <body>
 <header class="top">
@@ -38,6 +38,39 @@
     <h2>Jump to date</h2>
     <label>Date <input type="date" id="jumpDate" required></label>
     <div class="actions"><span class="spacer"></span><button type="button" id="jumpCancel">Cancel</button><button type="submit" class="primary">Go</button></div>
+  </form>
+</dialog>
+
+<dialog id="editChoiceDlg">
+  <h2>Edit a repeating event</h2>
+  <p id="editChoiceText" class="note"></p>
+  <button type="button" id="editThis" class="big">This day only</button>
+  <button type="button" id="editSeries" class="big">The whole series</button>
+  <div class="actions"><span class="spacer"></span><button type="button" id="editChoiceCancel">Cancel</button></div>
+</dialog>
+
+<dialog id="occDlg">
+  <form id="occForm">
+    <h2 id="occTitle">This day only</h2>
+    <p id="occNote" class="note"></p>
+    <label>Title <input name="title" required autocomplete="off"></label>
+    <div class="row">
+      <label>Date <input type="date" name="date" required></label>
+      <label class="check"><input type="checkbox" name="all_day"> All day</label>
+    </div>
+    <div class="row" id="occTimeRow">
+      <label>Start <input type="time" name="start_time"></label>
+      <label>End <input type="time" name="end_time"></label>
+    </div>
+    <label>Location <input name="location" autocomplete="off"></label>
+    <label>Notes <textarea name="notes" rows="2"></textarea></label>
+    <p><button type="button" id="occRestore" class="link" hidden>Put this day back to normal</button></p>
+    <div class="actions">
+      <button type="button" id="occSkip" class="danger">Skip this day</button>
+      <span class="spacer"></span>
+      <button type="button" id="occCancel">Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div>
   </form>
 </dialog>
 
@@ -106,6 +139,7 @@
     </div>
     <fieldset id="daysRow" hidden><legend>Repeat on</legend><div id="daysBox" class="pills"></div></fieldset>
     <label class="check" id="yearsRow" hidden><input type="checkbox" name="show_years"> Count the years (shows "turns 36"). Set the Date above to the real birth or start date, including the year.</label>
+    <fieldset id="excRow" hidden><legend>Changed days</legend><div id="excList"></div></fieldset>
     <fieldset><legend>Remind me <small id="remindWho"></small></legend><div id="remindBox" class="pills"></div></fieldset>
     <label>Notes <textarea name="notes" rows="2"></textarea></label>
     <div class="actions">
@@ -128,6 +162,8 @@
       <small>Single-use, expires in 7 days.</small>
     </div>
     <button id="signOut">Sign out</button>
+    <h4 class="sub">Change my password</h4>
+    <div class="addline"><input type="password" id="newPass" minlength="8" placeholder="New password (8+ characters)" autocomplete="new-password"><button id="changePass">Change</button></div>
   </section>
   <section>
     <h3>My time zone</h3>
@@ -154,6 +190,7 @@
     <h3>Notifications</h3>
     <p id="pushStatus" class="note"></p>
     <p id="pushDiag" class="note diag"></p>
+    <p id="healthLine" class="note"></p>
     <button id="pushOn">Turn on for this device</button>
     <button id="pushTest" hidden>Send a test</button>
     <small>Each device (phone, laptop) is turned on separately.</small>
@@ -192,9 +229,9 @@
 <div id="toast" hidden></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="config.js?v=25"></script>
-<script src="motd.js?v=25"></script>
-<script src="quickadd.js?v=25"></script>
-<script src="app.js?v=25"></script>
+<script src="config.js?v=27"></script>
+<script src="motd.js?v=27"></script>
+<script src="quickadd.js?v=27"></script>
+<script src="app.js?v=27"></script>
 </body>
 </html>

@@ -13,6 +13,49 @@ const icsTime = t => t.slice(0, 2) + t.slice(3, 5) + '00';      // 07:00[:00] ->
 const addDaysStr = (d, n) => new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) + n * DAY).toISOString().slice(0, 10);
 const utcStamp = ms => new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');   // 20261005T120000Z
 const BYDAY = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+const parseD = s => { const [y, m, d] = s.split('-').map(Number); return Date.UTC(y, m - 1, d); };
+const fmtD = ms => new Date(ms).toISOString().slice(0, 10);
+
+// Dates (YYYY-MM-DD, in the event's own wall calendar) on which an event occurs within [fromMs, toMs] (UTC midnights).
+function occurrenceDates(ev, fromMs, toMs) {
+  const start = parseD(ev.date), until = ev.repeat_until ? parseD(ev.repeat_until) : null, out = [];
+  if (!ev.repeat || ev.repeat === 'none') {
+    if (start >= fromMs && start <= toMs) out.push(fmtD(start));
+    return out;
+  }
+  const s = new Date(start);
+  if (ev.repeat === 'weekly' && ev.weekdays && ev.weekdays.length > 1) {
+    // Several days per week: weeks start Sunday, counted from the start date's week (same rule as the app).
+    const every = ev.repeat_every || 1, week0 = start - s.getUTCDay() * DAY, step = 7 * every * DAY;
+    const days = [...ev.weekdays].sort((a, b) => a - b);
+    for (let w = Math.max(0, Math.floor((fromMs - week0) / step) - 1); ; w++) {
+      const ws = week0 + w * step;
+      if (ws > toMs || (until !== null && ws > until)) break;
+      for (const wd of days) {
+        const d = ws + wd * DAY;
+        if (d < start || d < fromMs || d > toMs || (until !== null && d > until)) continue;
+        out.push(fmtD(d));
+      }
+    }
+    return out;
+  }
+  for (let i = 0; i < 5000; i++) {
+    let d;
+    if (ev.repeat === 'daily') d = start + i * DAY;
+    else if (ev.repeat === 'weekly') d = start + 7 * (ev.repeat_every || 1) * i * DAY;
+    else if (ev.repeat === 'yearly') { // a Feb 29 date falls on Feb 28 in non-leap years
+      d = Date.UTC(s.getUTCFullYear() + i, s.getUTCMonth(), s.getUTCDate());
+      if (new Date(d).getUTCMonth() !== s.getUTCMonth()) d = Date.UTC(s.getUTCFullYear() + i, s.getUTCMonth() + 1, 0);
+    } else { // monthly: months lacking that day-of-month are skipped, matching the app
+      d = Date.UTC(s.getUTCFullYear(), s.getUTCMonth() + i, s.getUTCDate());
+      if (new Date(d).getUTCDate() !== s.getUTCDate()) { if (d > toMs) break; continue; }
+    }
+    if (d > toMs || (until !== null && d > until)) break;
+    if (d >= fromMs) out.push(fmtD(d));
+  }
+  return out;
+}
+
 
 function tzParts(ms, tz) {
   const f = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -40,13 +83,16 @@ function fold(line) {
   return out.join('\r\n');
 }
 
-function buildEvent(ev, nameOf, memberCount) {
+// One VEVENT. `skips` become EXDATE lines; `rid` (the original start) marks this as the override for one day of a series.
+function veventLines(ev, nameOf, memberCount, skips = [], rid = null) {
   const allDay = ev.all_day || !ev.start_time;
   const lastDate = ev.end_date && ev.end_date > ev.date ? ev.end_date : ev.date;
   const stamp = utcStamp(Date.parse(ev.updated_at || ev.created_at || '2026-01-01T00:00:00Z') || 0);
   const names = (ev.who || []).map(nameOf).filter(Boolean);
   const suffix = names.length && names.length < memberCount ? ` (${names.join(', ')})` : '';   // say whose it is unless it's everyone's
-  const L = ['BEGIN:VEVENT', `UID:${ev.id}@trying-my-best`, `DTSTAMP:${stamp}`, `LAST-MODIFIED:${stamp}`];
+  const L = ['BEGIN:VEVENT', `UID:${ev.id}@trying-my-best`];
+  if (rid) L.push(rid(allDay, ev));
+  L.push(`DTSTAMP:${stamp}`, `LAST-MODIFIED:${stamp}`);
   let tzp = '';
   if (allDay) {
     L.push(`DTSTART;VALUE=DATE:${icsDate(ev.date)}`, `DTEND;VALUE=DATE:${icsDate(addDaysStr(lastDate, 1))}`);   // DTEND is exclusive for all-day
@@ -77,6 +123,7 @@ function buildEvent(ev, nameOf, memberCount) {
       else parts.push(`UNTIL=${icsDate(ev.repeat_until)}T235959`);
     }
     L.push('RRULE:' + parts.join(';'));
+    for (const x of skips) L.push(allDay ? `EXDATE;VALUE=DATE:${icsDate(x.original_date)}` : `EXDATE${tzp}:${icsDate(x.original_date)}T${icsTime(ev.start_time)}`);
   }
   L.push(`SUMMARY:${esc(ev.title + suffix)}`);
   if (ev.location) L.push(`LOCATION:${esc(ev.location)}`);
@@ -86,11 +133,33 @@ function buildEvent(ev, nameOf, memberCount) {
   return L;
 }
 
-function buildCalendar(events, members) {
+// A series with its single-day changes: skipped days become EXDATEs on the series; moved/changed days become override VEVENTs.
+function withException(ev, x) {
+  const p = { ...ev };
+  for (const k of ['title', 'start_time', 'end_time', 'all_day', 'location', 'notes']) if (x[k] !== null && x[k] !== undefined) p[k] = x[k];
+  return p;
+}
+function buildEvent(ev, nameOf, memberCount, exceptions = []) {
+  const repeating = ev.repeat && ev.repeat !== 'none';
+  const valid = x => repeating && occurrenceDates(ev, parseD(x.original_date), parseD(x.original_date)).length > 0;   // ignore leftovers the series no longer has
+  const mine = exceptions.filter(valid);
+  const lines = veventLines(ev, nameOf, memberCount, mine.filter(x => x.skipped));
+  const span = ev.end_date && ev.end_date > ev.date ? Math.round((parseD(ev.end_date) - parseD(ev.date)) / DAY) : 0;
+  const origAllDay = ev.all_day || !ev.start_time, tzp = origAllDay ? '' : (ev.tz ? `;TZID=${ev.tz}` : '');
+  for (const x of mine.filter(x => !x.skipped)) {
+    const date = x.new_date || x.original_date;
+    const p = { ...withException(ev, x), repeat: 'none', repeat_every: 1, weekdays: null, repeat_until: null, date, end_date: span ? addDaysStr(date, span) : null };
+    const rid = () => origAllDay ? `RECURRENCE-ID;VALUE=DATE:${icsDate(x.original_date)}` : `RECURRENCE-ID${tzp}:${icsDate(x.original_date)}T${icsTime(ev.start_time)}`;
+    lines.push(...veventLines(p, nameOf, memberCount, [], rid));
+  }
+  return lines;
+}
+
+function buildCalendar(events, members, exceptions = []) {
   const nameOf = id => (members.find(m => m.id === id) || {}).name;
   const L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Trying My Best//Family Calendar//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
     'X-WR-CALNAME:Trying My Best', 'REFRESH-INTERVAL;VALUE=DURATION:PT1H', 'X-PUBLISHED-TTL:PT1H'];
-  for (const ev of events) L.push(...buildEvent(ev, nameOf, members.length));
+  for (const ev of events) L.push(...buildEvent(ev, nameOf, members.length, exceptions.filter(x => x.event_id === ev.id)));
   L.push('END:VCALENDAR');
   return L.map(fold).join('\r\n') + '\r\n';
 }
@@ -112,7 +181,9 @@ Deno.serve(async req => {
   ]);
   if (events.error || members.error) return new Response('Server error', { status: 500 });
   const evs = events.data.map(e => ({ ...e, who: e.event_members.map(x => x.member_id) }));
-  const body = buildCalendar(evs, members.data);
+  let exceptions = [];
+  if (evs.length) { const ex = await sb.from('event_exceptions').select('*').in('event_id', evs.map(e => e.id)); if (!ex.error) exceptions = ex.data; }
+  const body = buildCalendar(evs, members.data, exceptions);
   return new Response(req.method === 'HEAD' ? null : body, {
     headers: { 'Content-Type': 'text/calendar; charset=utf-8', 'Cache-Control': 'no-cache', 'Content-Disposition': 'inline; filename="trying-my-best.ics"' },
   });

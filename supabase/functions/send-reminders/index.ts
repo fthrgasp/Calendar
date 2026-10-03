@@ -74,9 +74,32 @@ function startInstant(ev, dateStr, deviceTz) {
   return wallToMs(dateStr, allDay ? '09:00' : ev.start_time.slice(0, 5), tz);
 }
 
+// Skipped / changed days of a repeating event ("exceptions"): the occurrences that really happen.
+// null fields in an exception mean "same as the series".
+function withException(ev, x) {
+  const p = { ...ev };
+  for (const k of ['title', 'start_time', 'end_time', 'all_day', 'location', 'notes']) if (x[k] !== null && x[k] !== undefined) p[k] = x[k];
+  return p;
+}
+function effectiveStarts(ev, exceptions, fromMs, toMs) {
+  const mine = ev.repeat && ev.repeat !== 'none' ? exceptions.filter(x => x.event_id === ev.id) : [];   // only repeating events can have single-day changes
+  if (!mine.length) return occurrenceDates(ev, fromMs, toMs).map(date => ({ date, ev }));
+  const touched = new Set(mine.map(x => x.original_date));
+  const out = occurrenceDates(ev, fromMs, toMs).filter(d => !touched.has(d)).map(date => ({ date, ev }));
+  for (const x of mine) {
+    if (x.skipped) continue;
+    const target = x.new_date || x.original_date, t = parseD(target);
+    if (t < fromMs || t > toMs) continue;                    // also lets a day moved INTO the window count
+    const o = parseD(x.original_date);
+    if (!occurrenceDates(ev, o, o).length) continue;         // the series no longer has that day
+    out.push({ date: target, ev: withException(ev, x) });
+  }
+  return out;
+}
+
 // Which reminders should fire now? A reminder is due if its fire time is within the last `windowMs`.
 // People involved in an event but with no saved reminder row fall back to their default reminders.
-function computeDue({ events, eventMembers, reminders, members, subs, now, windowMs }) {
+function computeDue({ events, eventMembers, reminders, members, subs, now, windowMs, exceptions = [] }) {
   const memberById = Object.fromEntries(members.map(m => [m.id, m]));
   const deviceTz = {};
   for (const s of subs) if (!deviceTz[s.user_id]) deviceTz[s.user_id] = s.tz || 'UTC';
@@ -89,16 +112,16 @@ function computeDue({ events, eventMembers, reminders, members, subs, now, windo
   for (const ev of events) {
     const people = involved[ev.id];
     if (!people) continue;
-    const dates = occurrenceDates(ev, from, to);
+    const starts = effectiveStarts(ev, exceptions, from, to);
     for (const mid of people) {
       const m = memberById[mid];
       if (!m || !m.user_id || !deviceTz[m.user_id]) continue; // nobody to notify
       const minutesList = remRow[ev.id + '|' + mid] ?? m.default_reminders ?? [];
-      for (const date of dates) {
-        const occ = startInstant(ev, date, deviceTz[m.user_id]);
+      for (const { date, ev: e2 } of starts) {                 // e2 = the series, or the series with this day's changes
+        const occ = startInstant(e2, date, deviceTz[m.user_id]);
         for (const minutes of minutesList) {
           const fire = occ - minutes * 60000;
-          if (fire <= now && fire > now - windowMs) out.push({ ev, member: m, minutes, occ, date, tz: deviceTz[m.user_id] });
+          if (fire <= now && fire > now - windowMs) out.push({ ev: e2, member: m, minutes, occ, date, tz: deviceTz[m.user_id] });
         }
       }
     }
@@ -157,14 +180,18 @@ Deno.serve(async req => {
   // --- scheduled run ---
   if (req.headers.get('x-cron-secret') !== Deno.env.get('CRON_SECRET')) return json({ error: 'forbidden' }, 403);
   const now = Date.now(), today = fmtD(now);
+  // Heartbeat: tell the app this job is alive (it warns in Settings if this goes quiet). Failure to write it is not fatal.
+  const beat = detail => sb.from('system_status').upsert({ key: 'reminders', last_run: new Date().toISOString(), detail });
+  await beat(null);
   const q = t => sb.from(t).select('*');
   const [events, eventMembers, reminders, members, subs] = await Promise.all([
     q('events').is('deleted_at', null).or(`repeat.neq.none,and(date.gte.${fmtD(now - 3 * DAY)},date.lte.${fmtD(now + 10 * DAY)})`),
     q('event_members'), q('reminders'), q('members'), q('push_subscriptions'),
   ]);
-  for (const r of [events, eventMembers, reminders, members, subs]) if (r.error) return json({ error: r.error.message }, 500);
+  for (const r of [events, eventMembers, reminders, members, subs]) if (r.error) { await beat(r.error.message); return json({ error: r.error.message }, 500); }
+  const exceptions = await q('event_exceptions');           // single-day changes; if that table doesn't exist yet, carry on without them
 
-  const due = computeDue({ events: events.data, eventMembers: eventMembers.data, reminders: reminders.data, members: members.data, subs: subs.data, now, windowMs: 5 * 60000 });
+  const due = computeDue({ events: events.data, eventMembers: eventMembers.data, reminders: reminders.data, members: members.data, subs: subs.data, now, windowMs: 5 * 60000, exceptions: exceptions.error ? [] : exceptions.data });
   let delivered = 0;
   for (const d of due) {
     // claim it first so overlapping runs can't double-send

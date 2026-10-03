@@ -199,3 +199,33 @@ create policy "family reads lines" on public.custom_motds for select using (fami
 create policy "family adds lines" on public.custom_motds for insert
   with check (family_id in (select public.my_family_ids()) and (author_id is null or author_id in (select id from public.members where user_id = auth.uid())));
 create policy "family removes lines" on public.custom_motds for delete using (family_id in (select public.my_family_ids()));
+
+-- Skip or change one day of a repeating event; anything left null follows the series.
+create table public.event_exceptions (
+  id            uuid primary key default gen_random_uuid(),
+  event_id      uuid not null references public.events on delete cascade,
+  original_date date not null,
+  skipped       boolean not null default false,
+  new_date      date,
+  title         text,
+  start_time    time,
+  end_time      time,
+  all_day       boolean,
+  location      text,
+  notes         text,
+  created_at    timestamptz not null default now(),
+  unique (event_id, original_date)
+);
+alter table public.event_exceptions enable row level security;
+create policy "family event exceptions" on public.event_exceptions for all
+  using (exists (select 1 from public.events e where e.id = event_id and e.family_id in (select public.my_family_ids())))
+  with check (exists (select 1 from public.events e where e.id = event_id and e.family_id in (select public.my_family_ids())));
+
+-- Heartbeat written by the reminder function; the app warns if it goes quiet.
+create table public.system_status (
+  key      text primary key,
+  last_run timestamptz not null default now(),
+  detail   text
+);
+alter table public.system_status enable row level security;
+create policy "signed-in users read status" on public.system_status for select to authenticated using (true);

@@ -108,6 +108,16 @@ const store = {
     hour24 = me().time_format === '24';
     try { db.customMotds = await run(sb.from('custom_motds').select('id, text, spicy, author_id').eq('family_id', familyId).order('created_at')); db.customMotdsOk = true; }
     catch (e) { db.customMotds = []; db.customMotdsOk = false; } // table not created yet: the built-in lines still work
+    try { // single-day changes to repeating events; row-level security limits this to the family
+      const exs = await run(sb.from('event_exceptions').select('*'));
+      db.exceptionsOk = true;
+      const byId = Object.fromEntries(db.events.map(ev => [ev.id, ev]));
+      for (const ev of db.events) ev.exceptions = [];
+      const hm = t => t ? t.slice(0, 5) : null;
+      for (const x of exs) if (byId[x.event_id]) byId[x.event_id].exceptions.push({
+        id: x.id, original_date: x.original_date, skipped: x.skipped, new_date: x.new_date || null, title: x.title,
+        start_time: hm(x.start_time), end_time: hm(x.end_time), all_day: x.all_day, location: x.location, notes: x.notes });
+    } catch (e) { db.exceptionsOk = false; for (const ev of db.events) ev.exceptions = []; }
     syncPushDevice(userId);
     return true;
   },
@@ -126,6 +136,10 @@ const store = {
     if (ev.who.length) await run(sb.from('event_members').insert(ev.who.map(m => ({ event_id: ev.id, member_id: m }))));
     await run(sb.from('reminders').upsert({ event_id: ev.id, member_id: db.me, minutes: ev.reminders[db.me] || [] }));
   },
+  saveException: (ev, x) => run(sb.from('event_exceptions').upsert({
+    event_id: ev.id, original_date: x.original_date, skipped: x.skipped, new_date: x.new_date, title: x.title,
+    start_time: x.start_time, end_time: x.end_time, all_day: x.all_day, location: x.location, notes: x.notes }, { onConflict: 'event_id,original_date' })),
+  removeException: (ev, x) => run(sb.from('event_exceptions').delete().eq('event_id', ev.id).eq('original_date', x.original_date)),
   setDeleted: (ev, when) => run(sb.from('events').update({ deleted_at: when }).eq('id', ev.id)),
   hardDelete: ev => run(sb.from('events').delete().eq('id', ev.id)),
   saveMember: m => run(sb.from('members').update({ name: m.name, color: m.color, default_reminders: m.defaultReminders, tz: m.tz || null, time_format: m.time_format || null }).eq('id', m.id)),
@@ -143,7 +157,7 @@ async function persist(fn) {
 async function refresh() {
   try {
     const { data: { session } } = await sb.auth.getSession();
-    if (session && await store.load(session.user.id)) render();
+    if (session && await store.load(session.user.id)) { render(); checkReminderHealth(); }
   } catch (e) { console.error(e); }
 }
 
@@ -215,17 +229,35 @@ function occurrenceStarts(ev, from, to) {
 // Days an event covers within [from, to]. A multi-day event (end_date after date) yields one entry per day,
 // and repeating multi-day events expand every occurrence over its full length.
 const spanDays = ev => ev.end_date && ev.end_date > ev.date ? Math.round((parse(ev.end_date) - parse(ev.date)) / 864e5) : 0;
+// One day of a repeating event can be skipped or changed on its own (a shift swap, a day off). An "exception" holds that
+// day's differences; anything it leaves null just follows the series.
+function withException(ev, x) {
+  const p = { ...ev };
+  for (const k of ['title', 'start_time', 'end_time', 'all_day', 'location', 'notes']) if (x[k] !== null && x[k] !== undefined) p[k] = x[k];
+  return p;
+}
 function occurrences(ev, from, to) {
-  const span = spanDays(ev);
-  if (!span) return occurrenceStarts(ev, from, to);
+  const span = spanDays(ev), exs = ev.repeat && ev.repeat !== 'none' ? ev.exceptions || [] : [];   // single-day changes only apply to repeating events
+  const reach = addDays(from, -span);                    // a run that starts before `from` may still reach into it
+  const runs = [];                                       // { date, ev (patched for changed days), src, exception }
+  const touched = new Set(exs.map(x => x.original_date));
+  for (const o of occurrenceStarts(ev, reach, to)) if (!touched.has(o.date)) runs.push({ date: o.date, ev, src: o.date });
+  for (const x of exs) {
+    if (x.skipped) continue;
+    const target = x.new_date || x.original_date, t = parse(target);
+    if (t < reach || t > to) continue;                   // also catches a day moved into view from outside it
+    const o = parse(x.original_date);
+    if (!occurrenceStarts(ev, o, o).length) continue;    // the series no longer has that day: ignore the leftover change
+    runs.push({ date: target, ev: withException(ev, x), src: x.original_date, exception: x });
+  }
   const out = [];
-  for (const o of occurrenceStarts(ev, addDays(from, -span), to)) { // an occurrence starting before `from` may still reach into it
+  for (const r of runs) {
     for (let k = 0; k <= span; k++) {
-      const d = addDays(parse(o.date), k);
-      if (d >= from && d <= to) out.push({ ev, date: ymd(d), day: k, span, startDate: o.date });
+      const d = addDays(parse(r.date), k);
+      if (d >= from && d <= to) out.push({ ev: r.ev, series: ev, date: ymd(d), day: k, span, startDate: r.date, src: r.src, exception: r.exception });
     }
   }
-  return out;
+  return out.sort((a, b) => a.date.localeCompare(b.date));
 }
 
 // ---------- state ----------
@@ -242,21 +274,22 @@ function multiDayView(ev, o) {
   const timed = !ev.all_day && ev.start_time;
   const zoneTag = timed && ev.tz && ev.tz !== myTz() ? tzAbbr(wallToMs(o.startDate, ev.start_time, ev.tz), ev.tz) : '';
   return {
-    ev, date: o.date, src: o.startDate, startDate: o.startDate, day: o.day, span: o.span, zoneTag, from: null,
+    ev, series: o.series || ev, exception: o.exception, date: o.date, src: o.src || o.startDate, startDate: o.startDate, day: o.day, span: o.span, zoneTag, from: null,
     start: o.day === 0 && timed ? ev.start_time : '',
     end: o.day === o.span && !ev.all_day && ev.end_time ? ev.end_time : '',
   };
 }
 function toViewer(ev, date, o) {
   if (o && o.span > 0) return multiDayView(ev, o);
-  const same = { ev, date, src: date, start: ev.all_day ? '' : ev.start_time, end: ev.all_day ? '' : ev.end_time, from: null };
+  const link = { series: (o && o.series) || ev, exception: o && o.exception, src: (o && o.src) || date, startDate: (o && o.startDate) || date };
+  const same = { ev, ...link, date, start: ev.all_day ? '' : ev.start_time, end: ev.all_day ? '' : ev.end_time, from: null };
   const vz = myTz();
   if (!ev.tz || ev.all_day || !ev.start_time || ev.tz === vz) return same;
   const startMs = wallToMs(date, ev.start_time, ev.tz);
   const s = msToWall(startMs, vz);
   if (s.time === ev.start_time && s.date === date) return same; // zones happen to agree at this moment
   const end = ev.end_time ? msToWall(wallToMs(date, ev.end_time, ev.tz), vz).time : '';
-  return { ev, date: s.date, src: date, start: s.time, end, from: `${fmtTime(ev.start_time)} ${tzAbbr(startMs, ev.tz)}` };
+  return { ev, ...link, date: s.date, start: s.time, end, from: `${fmtTime(ev.start_time)} ${tzAbbr(startMs, ev.tz)}` };
 }
 
 const visibleEvents = (from, to, ignoreFilter = false) => {
@@ -267,7 +300,7 @@ const visibleEvents = (from, to, ignoreFilter = false) => {
     if (!ignoreFilter && hidden.size && ev.who.length && ev.who.every(w => hidden.has(w))) continue;
     // widen by a day each side: a zone shift can move an occurrence across the range edge
     for (const o of occurrences(ev, addDays(from, -1), addDays(to, 1))) {
-      const v = toViewer(ev, o.date, o);
+      const v = toViewer(o.ev, o.date, o);   // o.ev is the series, or the series with this one day's changes applied
       if (v.date >= fromKey && v.date <= toKey) list.push(v);
     }
   }
@@ -531,11 +564,102 @@ let selWho = new Set(), selRemind = new Set(), selDays = new Set();
 function duplicatePrefill(o) {
   const ev = o.ev;
   return {
-    title: ev.title, date: o.src || ev.date, all_day: ev.all_day, start_time: ev.start_time, end_time: ev.end_time,
+    title: ev.title, date: o.startDate || o.src || ev.date, all_day: ev.all_day, start_time: ev.start_time, end_time: ev.end_time,
     location: ev.location, notes: ev.notes, repeat: ev.repeat, repeat_every: ev.repeat_every, repeat_until: ev.repeat_until,
     weekdays: ev.weekdays, end_date: ev.end_date, show_years: ev.show_years, who: ev.who, tz: ev.tz, remind: ev.reminders[db.me] || [],
     note: `Copied from “${ev.title}”. Change what's different, then press Save.`,
   };
+}
+
+// ---------- changing just one day of a repeating event ----------
+const fmtShortDate = d => parse(d).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+const isRepeating = ev => !!ev.repeat && ev.repeat !== 'none';
+let occCtx = null;
+
+// Edit on a repeating event asks which: this day only, or the whole series (a second, deliberate choice).
+function editFromCard(o) {
+  const series = o.series || o.ev;
+  if (!isRepeating(series) || !db.exceptionsOk) { openEvent(series, o.date); return; }   // not repeating, or the database isn't ready for single-day changes
+  $('#editChoiceText').textContent = `“${series.title}” repeats. Change just ${fmtShortDate(o.startDate)}, or every one of them?`;
+  $('#editThis').onclick = () => { $('#editChoiceDlg').close(); openOccurrence(o); };
+  $('#editSeries').onclick = () => { $('#editChoiceDlg').close(); openEvent(series, o.date); };
+  $('#editChoiceDlg').showModal();
+}
+$('#editChoiceCancel').onclick = () => $('#editChoiceDlg').close();
+
+function openOccurrence(o) {
+  const s = o.series || o.ev, cur = o.ev, f = $('#occForm').elements;
+  occCtx = { o, s };
+  $('#occTitle').textContent = `This day only: ${fmtShortDate(o.startDate)}`;
+  const zone = s.tz && s.tz !== myTz() ? `Times are in ${tzLabel(s.tz)}, the zone this event was entered in. ` : '';
+  $('#occNote').textContent = zone + 'Only this day changes. The rest of the series stays as it is.';
+  f.title.value = cur.title; f.date.value = o.startDate; f.all_day.checked = !!cur.all_day;
+  f.start_time.value = cur.start_time || '09:00'; f.end_time.value = cur.end_time || '10:00';
+  f.location.value = cur.location || ''; f.notes.value = cur.notes || '';
+  $('#occTimeRow').hidden = f.all_day.checked;
+  $('#occRestore').hidden = !o.exception;
+  $('#occDlg').showModal();
+}
+$('#occForm').elements.all_day.onchange = e => { $('#occTimeRow').hidden = e.target.checked; };
+$('#occCancel').onclick = () => $('#occDlg').close();
+
+const NO_CHANGES = { skipped: false, new_date: null, title: null, start_time: null, end_time: null, all_day: null, location: null, notes: null };
+// Keep only what differs from the series (null = follows the series). Nothing different at all = no exception.
+function saveException(s, row, existing) {
+  const x = { ...NO_CHANGES, ...row };
+  const empty = !x.skipped && ['new_date', 'title', 'all_day', 'start_time', 'end_time', 'location', 'notes'].every(k => x[k] === null);
+  if (empty) { if (existing) removeException(s, existing); return; }
+  s.exceptions = (s.exceptions || []).filter(y => y.original_date !== x.original_date).concat(x);
+  render(); persist(() => store.saveException(s, x));
+}
+function removeException(s, x) {
+  s.exceptions = (s.exceptions || []).filter(y => y.original_date !== x.original_date);
+  render(); persist(() => store.removeException(s, x));
+}
+$('#occForm').onsubmit = e => {
+  e.preventDefault();
+  const { o, s } = occCtx, f = $('#occForm').elements, allDay = f.all_day.checked;
+  const differs = (a, b) => a !== (b || '');
+  saveException(s, {
+    original_date: o.src,
+    new_date: f.date.value !== o.src ? f.date.value : null,
+    title: differs(f.title.value.trim(), s.title) ? f.title.value.trim() : null,
+    all_day: allDay !== !!s.all_day ? allDay : null,
+    start_time: !allDay && differs(f.start_time.value, s.start_time) ? f.start_time.value : null,
+    end_time: !allDay && differs(f.end_time.value, s.end_time) ? f.end_time.value : null,
+    location: differs(f.location.value.trim(), s.location) ? f.location.value.trim() : null,
+    notes: differs(f.notes.value.trim(), s.notes) ? f.notes.value.trim() : null,
+  }, o.exception);
+  $('#occDlg').close();
+};
+$('#occSkip').onclick = () => {
+  const { o, s } = occCtx;
+  if (!confirm(`Skip ${fmtShortDate(o.startDate)}? The rest of the series is untouched.`)) return;
+  saveException(s, { original_date: o.src, skipped: true }, o.exception);
+  $('#occDlg').close();
+  toast('Skipped. To undo it, edit the series and use Restore under "Changed days".');
+};
+$('#occRestore').onclick = () => { removeException(occCtx.s, occCtx.o.exception); $('#occDlg').close(); };
+
+// "Changed days" inside the whole-series form: the only place a skipped day can be brought back.
+function describeException(x) {
+  const day = fmtShortDate(x.original_date);
+  if (x.skipped) return `${day}: skipped`;
+  const bits = [];
+  if (x.new_date) bits.push('moved to ' + fmtShortDate(x.new_date));
+  if (x.title) bits.push('renamed');
+  if (x.all_day !== null && x.all_day !== undefined) bits.push(x.all_day ? 'all day' : 'timed');
+  if (x.start_time || x.end_time) bits.push('different time');
+  if (x.location) bits.push('different place');
+  if (x.notes) bits.push('different notes');
+  return `${day}: ${bits.join(', ') || 'changed'}`;
+}
+function renderExcList(ev) {
+  const list = ((ev && ev.exceptions) || []).slice().sort((a, b) => a.original_date.localeCompare(b.original_date));
+  $('#excRow').hidden = !list.length;
+  $('#excList').replaceChildren(...list.map(x => el('div', { class: 'trash-row' },
+    el('span', {}, describeException(x)),
+    el('button', { type: 'button', onclick: () => { if (confirm('Put that day back to normal?')) { removeException(ev, x); renderExcList(ev); } } }, 'Restore'))));
 }
 
 // Read-only card: tapping an event only looks. Changing anything takes a deliberate press of Edit.
@@ -561,8 +685,9 @@ function openDetail(o) {
     row('Where', ev.location),
     row('Repeats', repeatText ? `${repeatText.replace('Repeats ', '')}${ev.repeat_until ? ' until ' + parse(ev.repeat_until).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : ''} · edits change the whole series` : ''),
     row('Reminders', mins.length ? mins.map(m => (REMIND_OPTS.find(r => r[0] === m) || [m, m + ' min'])[1] + (m ? ' before' : '')).join(', ') : ''),
+    row('Changed', o.exception ? 'This day differs from the usual schedule.' : ''),
     row('Notes', ev.notes));
-  $('#detailEdit').onclick = () => { d.close(); openEvent(ev, o.date); };
+  $('#detailEdit').onclick = () => { d.close(); editFromCard(o); };
   $('#detailDup').onclick = () => { d.close(); openEvent(null, null, duplicatePrefill(o)); };
   d.showModal();
 }
@@ -605,6 +730,7 @@ function openEvent(ev, dateHint, prefill) {
   selWho = new Set(ev ? ev.who : prefill && prefill.who ? prefill.who : [db.me]);
   selRemind = new Set(ev ? (ev.reminders[db.me] || []) : prefill && prefill.remind ? prefill.remind : me().defaultReminders);
   selDays = new Set(ev ? ev.weekdays || [] : prefill && prefill.weekdays || []);
+  renderExcList(ev);
   pillSet($('#whoBox'), db.members.map(m => [m.id, m.name]), selWho, id => member(id).color);
   pillSet($('#remindBox'), REMIND_OPTS, selRemind);
   $('#remindWho').textContent = `(for ${me().name})`;
@@ -702,7 +828,7 @@ let chronoLoading = null;
 function loadChrono() {
   if (window.chrono) return Promise.resolve();
   return chronoLoading ||= new Promise((resolve, reject) => {
-    const s = el('script', { src: 'vendor/chrono-2.5.0.js?v=25' });
+    const s = el('script', { src: 'vendor/chrono-2.5.0.js?v=27' });
     s.onload = resolve;
     s.onerror = () => { chronoLoading = null; reject(new Error('chrono failed to load')); };
     document.head.append(s);
@@ -823,6 +949,7 @@ function renderMenu() {
   renderPushStatus();
   renderFeed();
   renderCustomMotds();
+  checkReminderHealth();
 }
 $('#menuBtn').onclick = () => { renderMenu(); menu.showModal(); };
 
@@ -848,6 +975,30 @@ $('#feedCopy').onclick = async () => {
   catch { $('#feedLink').select(); }
 };
 
+// ---------- reminder health (heartbeat) ----------
+// The reminder function stamps system_status every minute. If the stamp goes stale, something upstream stopped
+// (most often "Verify JWT" flipping back on), so say so instead of letting reminders fail silently.
+const STALE_MIN = 10;
+const ageLabel = m => m < 60 ? `${m} min` : m < 1440 ? `${Math.floor(m / 60)} hr` : `${Math.floor(m / 1440)} days`;
+async function checkReminderHealth() {
+  let state = 'unknown', text = '';
+  try {
+    const rows = await run(sb.from('system_status').select('last_run, detail').eq('key', 'reminders').limit(1));
+    if (!rows.length) { state = 'none'; text = "The reminder checker hasn't reported in yet. Give it a few minutes, or redeploy the send-reminders function."; }
+    else {
+      const age = Math.max(0, Math.floor((Date.now() - Date.parse(rows[0].last_run)) / 60000));
+      if (age >= STALE_MIN) { state = 'stale'; text = `⚠ The reminder checker last ran ${ageLabel(age)} ago, so reminders may not be sending. The usual cause is "Verify JWT" switching back on for the send-reminders function in Supabase.`; }
+      else if (rows[0].detail) { state = 'error'; text = `⚠ The reminder checker is running but hit a problem: ${rows[0].detail}`; }
+      else { state = 'ok'; text = `✓ Reminder checker ran ${age < 1 ? 'just now' : ageLabel(age) + ' ago'}.`; }
+    }
+  } catch (e) { state = 'unknown'; text = ''; }              // the table isn't there yet: say nothing
+  if (db) db.reminderHealth = state;
+  $('#menuBtn').classList.toggle('alert', state === 'stale' || state === 'error');
+  $('#healthLine').textContent = text;
+  return state;
+}
+setInterval(() => { if (db) checkReminderHealth(); }, 5 * 60000);
+
 // ---------- push notifications ----------
 const b64ToBytes = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(s.length / 4) * 4, '=')), c => c.charCodeAt(0));
 const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
@@ -869,7 +1020,7 @@ async function syncPushDevice(userId) {
   try { const sub = await currentSub(); if (sub && Notification.permission === 'granted') await saveSub(sub, userId); }
   catch (e) { console.error(e); }
 }
-const APP_BUILD = 'v25';
+const APP_BUILD = 'v27';
 // One line of plain-text device state, so "it doesn't work" can be diagnosed without guessing.
 async function showPushDiag() {
   const parts = [`build ${APP_BUILD}`, `Home Screen app: ${isStandalone() ? 'yes' : 'no'}`];
@@ -969,6 +1120,13 @@ $('#copyInvite').onclick = async () => {
   try { await navigator.clipboard.writeText($('#inviteLink').value); toast('Link copied'); }
   catch { $('#inviteLink').select(); }
 };
+$('#changePass').onclick = async () => {
+  const input = $('#newPass');
+  if (input.value.length < 8) { toast('Use at least 8 characters.'); return; }
+  const { error } = await sb.auth.updateUser({ password: input.value });
+  if (error) { toast(/same|different/i.test(error.message) ? 'Pick a password you have not used for this account.' : "Couldn't change it: " + error.message); return; }
+  input.value = ''; toast('Password changed.');
+};
 $('#signOut').onclick = async () => { if (confirm('Sign out on this device?')) { await sb.auth.signOut(); } };
 
 // ---------- sign-in gate ----------
@@ -1004,7 +1162,51 @@ function showLogin(mode = 'signin', email = '') {
     el('p', {}, invited ? "You've been invited! Create an account (or sign in) to join." : creating ? 'Create your account.' : 'Sign in to see the family calendar.'),
     f,
     el('p', { class: 'alt' }, el('button', { class: 'link', onclick: () => showLogin(creating ? 'signin' : 'signup', emailIn.value) },
-      creating ? 'I already have an account' : 'New here? Create an account')));
+      creating ? 'I already have an account' : 'New here? Create an account')),
+    creating ? '' : el('p', { class: 'alt' }, el('button', { class: 'link', onclick: () => showForgot(emailIn.value) }, 'Forgot your password?')));
+}
+
+// Password reset: Supabase emails a link; it opens in the browser (not the Home Screen app), where the new password is chosen.
+// Then sign in to the app as usual. The "email sent" message is the same whether or not the address has an account.
+let recoveryMode = false, recoveryShown = false;
+function showForgot(email = '') {
+  const err = errBox();
+  const emailIn = el('input', { type: 'email', required: '', autocomplete: 'email', inputmode: 'email', value: email });
+  const back = el('p', { class: 'alt' }, el('button', { class: 'link', onclick: () => showLogin('signin', emailIn.value) }, 'Back to sign in'));
+  const f = el('form', { onsubmit: async e => {
+    e.preventDefault(); err.textContent = '';
+    const { error } = await sb.auth.resetPasswordForEmail(emailIn.value.trim(), { redirectTo: location.origin + location.pathname });
+    if (error) { err.textContent = /rate|too many|seconds|limit/i.test(error.message) ? 'Too many requests right now. Wait a few minutes and try again.' : "Couldn't send the email. Check the address and try again."; return; }
+    showGate(el('h1', {}, 'Check your email'),
+      el('p', {}, 'If that address has an account, a reset link is on its way. It can take a few minutes and may land in spam. The link opens in your browser: choose a new password there, then come back to the app and sign in.'),
+      el('p', { class: 'alt' }, el('button', { class: 'link', onclick: () => showLogin('signin', emailIn.value) }, 'Back to sign in')));
+  } }, el('label', {}, 'Email', emailIn), err, el('button', { class: 'primary', type: 'submit' }, 'Email me a reset link'));
+  showGate(el('h1', {}, 'Reset your password'), el('p', {}, "Enter your email and we'll send you a link to choose a new password."), f, back);
+}
+function showNewPassword() {
+  const err = errBox();
+  const p1 = el('input', { type: 'password', required: '', minlength: '8', autocomplete: 'new-password' });
+  const p2 = el('input', { type: 'password', required: '', minlength: '8', autocomplete: 'new-password' });
+  const f = el('form', { onsubmit: async e => {
+    e.preventDefault(); err.textContent = '';
+    if (p1.value !== p2.value) { err.textContent = "Those two passwords don't match."; return; }
+    const { error } = await sb.auth.updateUser({ password: p1.value });
+    if (error) { err.textContent = /same|different/i.test(error.message) ? 'Pick a password you have not used for this account.' : error.message; return; }
+    recoveryMode = false; history.replaceState(null, '', location.pathname);
+    showGate(el('h1', {}, 'Password updated ✓'),
+      el('p', {}, "You're all set. If you did this in your phone's browser, go back to the app and sign in with the new password."),
+      el('button', { class: 'primary', type: 'button', onclick: () => start() }, 'Continue here'));
+  } }, el('label', {}, 'New password (8+ characters)', p1), el('label', {}, 'Type it again', p2), err, el('button', { class: 'primary', type: 'submit' }, 'Save new password'));
+  showGate(el('h1', {}, 'Choose a new password'), f);
+}
+// What the page address says about a reset link: a valid one carries type=recovery, an expired one carries an error.
+function readResetLink(hash) {
+  return { recovery: /type=recovery/.test(hash), failed: /error=|error_code=|error_description=/.test(hash) };
+}
+function showResetFailed() {
+  showGate(el('h1', {}, "That link didn't work"),
+    el('p', {}, 'Reset links expire quickly and only work once. Request a fresh one and use it right away.'),
+    el('button', { class: 'primary', type: 'button', onclick: () => showForgot() }, 'Get a new link'));
 }
 
 function showOnboarding() {
@@ -1044,7 +1246,7 @@ async function start() {
   const { data: { session } } = await sb.auth.getSession();
   if (!session) { db = null; return showLogin(localStorage.getItem(INVITE_KEY) ? "signup" : "signin"); }
   try {
-    if (await store.load(session.user.id)) { hideGate(); render(); consumePending(); }
+    if (await store.load(session.user.id)) { hideGate(); render(); consumePending(); checkReminderHealth(); }
     else showOnboarding();
   } catch (e) {
     console.error(e);
@@ -1052,7 +1254,21 @@ async function start() {
   }
 }
 
+// While a password reset is in progress, don't open the calendar behind the "choose a new password" screen.
+function handleAuthEvent(event, session) {
+  if (event === 'PASSWORD_RECOVERY') { recoveryMode = true; if (!recoveryShown) { recoveryShown = true; setTimeout(showNewPassword, 0); } return; }
+  if (recoveryMode) {
+    if ((event === 'SIGNED_IN' || event === 'INITIAL_SESSION') && session && !recoveryShown) { recoveryShown = true; setTimeout(showNewPassword, 0); }
+    return;
+  }
+  // Deferred: supabase must not be called from inside its own callback.
+  // INITIAL_SESSION fires once on load; SIGNED_IN also re-fires on tab refocus, so only act on it before data is loaded.
+  if (event === 'INITIAL_SESSION' || event === 'SIGNED_OUT' || (event === 'SIGNED_IN' && !db)) setTimeout(start, 0);
+}
+
 (function boot() {
+  const reset = readResetLink(location.hash);
+  if (reset.recovery) recoveryMode = true;
   const params = new URLSearchParams(location.search);
   const code = params.get('invite');
   pendingAdd = pendingFromParams(params);
@@ -1063,11 +1279,8 @@ async function start() {
     return;
   }
   sb = supabase.createClient(FAMCAL_CONFIG.url, FAMCAL_CONFIG.key);
-  sb.auth.onAuthStateChange((event) => {
-    // Deferred: supabase must not be called from inside its own callback.
-    // INITIAL_SESSION fires once on load; SIGNED_IN also re-fires on tab refocus, so only act on it before data is loaded.
-    if (event === 'INITIAL_SESSION' || event === 'SIGNED_OUT' || (event === 'SIGNED_IN' && !db)) setTimeout(start, 0);
-  });
+  sb.auth.onAuthStateChange(handleAuthEvent);
+  if (reset.failed) { history.replaceState(null, '', location.pathname); showResetFailed(); }
   document.addEventListener('visibilitychange', () => { if (!document.hidden && db) refresh(); });
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 })();

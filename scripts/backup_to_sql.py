@@ -12,7 +12,7 @@ people must sign up again and their members.user_id values need re-linking.
 import json, sys
 
 TABLES = [  # (table, primary key columns), in dependency order
-    ('families', ['id']), ('members', ['id']), ('events', ['id']),
+    ('families', ['id']), ('members', ['id']), ('events', ['id']), ('event_exceptions', ['id']),
     ('event_members', ['event_id', 'member_id']), ('reminders', ['event_id', 'member_id']), ('custom_motds', ['id']),
 ]
 

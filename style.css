@@ -128,3 +128,10 @@ section button { margin: 4px 4px 4px 0; }
 .addline { display: flex; gap: 6px; margin: 4px 0 2px; }
 .addline input { flex: 1; min-width: 0; padding: 7px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font-size: .95rem; }
 h4.sub { margin: 14px 0 4px; font-size: .85rem; color: var(--muted); font-weight: 600; }
+
+button.link { background: none; border: 0; color: var(--accent); padding: 4px 0; }
+#excRow[hidden] { display: none; }
+
+/* a small red dot on the gear when the reminder checker has gone quiet */
+#menuBtn { position: relative; }
+#menuBtn.alert::after { content: ""; position: absolute; top: 3px; right: 3px; width: 9px; height: 9px; border-radius: 50%; background: #e53e3e; box-shadow: 0 0 0 2px var(--bg); }
