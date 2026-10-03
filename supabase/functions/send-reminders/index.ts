@@ -147,60 +147,91 @@ function describe(d) {
 const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type' };
 const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
+// Supabase hands back at most 1000 rows per request (its "Max rows" API setting) and says nothing about the rest,
+// so anything that grows over time is read a page at a time. `build` makes a fresh, ordered query for each page.
+const PAGE = 1000;
+async function fetchAll(build) {
+  const rows = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await build().range(from, from + PAGE - 1);
+    if (error) return { data: null, error };
+    rows.push(...data);
+    if (data.length < PAGE) return { data: rows, error: null };
+  }
+}
+
 async function pushTo(sb, subs, payload) {
-  let sent = 0;
+  let sent = 0, failed = 0, lastError = '';
   await Promise.all(subs.map(async s => {
     try {
       await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, JSON.stringify(payload));
       sent++;
     } catch (e) {
       if (e.statusCode === 404 || e.statusCode === 410) await sb.from('push_subscriptions').delete().eq('id', s.id); // device unsubscribed
-      else console.error('push failed', e.statusCode, e.body);
+      else { failed++; lastError = e.statusCode ? `HTTP ${e.statusCode}` : String(e.message || e); console.error('push failed', e.statusCode, e.body); }
     }
   }));
-  return sent;
+  return { sent, failed, lastError };
 }
 
-Deno.serve(async req => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
-  const sb = createClient(Deno.env.get('SUPABASE_URL'), Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'));
-  webpush.setVapidDetails(Deno.env.get('VAPID_SUBJECT') || 'mailto:admin@example.com', Deno.env.get('VAPID_PUBLIC_KEY'), Deno.env.get('VAPID_PRIVATE_KEY'));
-  const body = await req.json().catch(() => ({}));
+const setVapid = () => webpush.setVapidDetails(Deno.env.get('VAPID_SUBJECT') || 'mailto:admin@example.com', Deno.env.get('VAPID_PUBLIC_KEY'), Deno.env.get('VAPID_PRIVATE_KEY'));
 
-  // --- test button: the signed-in user sends a notification to their own devices ---
-  if (body.test) {
-    const jwt = (req.headers.get('authorization') || '').replace(/^Bearer /i, '');
-    const { data: { user } } = await sb.auth.getUser(jwt);
-    if (!user) return json({ error: 'not signed in' }, 401);
-    const { data: subs } = await sb.from('push_subscriptions').select('*').eq('user_id', user.id);
-    const sent = await pushTo(sb, subs || [], { title: 'Notifications are working 🎉', body: 'Reminders from the family calendar will show up like this.', tag: 'test' });
-    return json({ devices: (subs || []).length, sent });
-  }
+// Heartbeat for the app's Settings (red dot on the gear when something's wrong). 'reminders' is stamped when a run FINISHES,
+// with detail = what went wrong if it didn't, so a run that crashes partway never looks healthy. Failure to write it is not fatal.
+const beat = (sb, detail) => sb.from('system_status').upsert({ key: 'reminders', last_run: new Date().toISOString(), detail });
 
-  // --- scheduled run ---
-  if (req.headers.get('x-cron-secret') !== Deno.env.get('CRON_SECRET')) return json({ error: 'forbidden' }, 403);
-  const now = Date.now(), today = fmtD(now);
-  // Heartbeat: tell the app this job is alive (it warns in Settings if this goes quiet). Failure to write it is not fatal.
-  const beat = detail => sb.from('system_status').upsert({ key: 'reminders', last_run: new Date().toISOString(), detail });
-  await beat(null);
-  const q = t => sb.from(t).select('*');
-  const [events, eventMembers, reminders, members, subs] = await Promise.all([
-    q('events').is('deleted_at', null).or(`repeat.neq.none,and(date.gte.${fmtD(now - 3 * DAY)},date.lte.${fmtD(now + 10 * DAY)})`),
-    q('event_members'), q('reminders'), q('members'), q('push_subscriptions'),
+async function scheduledRun(sb) {
+  setVapid();
+  const now = Date.now();
+  // Who's involved and their saved reminders ride along with each event, so only rows for events that matter are read.
+  const [events, members, subs] = await Promise.all([
+    fetchAll(() => sb.from('events').select('*, event_members(member_id), reminders(member_id, minutes)').is('deleted_at', null)
+      .or(`repeat.neq.none,and(date.gte.${fmtD(now - 3 * DAY)},date.lte.${fmtD(now + 10 * DAY)})`).order('id')),
+    fetchAll(() => sb.from('members').select('*').order('id')),
+    fetchAll(() => sb.from('push_subscriptions').select('*').order('id')),
   ]);
-  for (const r of [events, eventMembers, reminders, members, subs]) if (r.error) { await beat(r.error.message); return json({ error: r.error.message }, 500); }
-  const exceptions = await q('event_exceptions');           // single-day changes; if that table doesn't exist yet, carry on without them
+  for (const r of [events, members, subs]) if (r.error) { await beat(sb, r.error.message); return json({ error: r.error.message }, 500); }
+  const exceptions = await fetchAll(() => sb.from('event_exceptions').select('*').order('id'));   // single-day changes; if that table doesn't exist yet, carry on without them
+  const eventMembers = events.data.flatMap(e => e.event_members.map(x => ({ event_id: e.id, member_id: x.member_id })));
+  const reminders = events.data.flatMap(e => e.reminders.map(r => ({ event_id: e.id, member_id: r.member_id, minutes: r.minutes })));
 
-  const due = computeDue({ events: events.data, eventMembers: eventMembers.data, reminders: reminders.data, members: members.data, subs: subs.data, now, windowMs: 5 * 60000, exceptions: exceptions.error ? [] : exceptions.data });
-  let delivered = 0;
+  const due = computeDue({ events: events.data, eventMembers, reminders, members: members.data, subs: subs.data, now, windowMs: 5 * 60000, exceptions: exceptions.error ? [] : exceptions.data });
+  let delivered = 0, failed = 0, lastError = '';
   for (const d of due) {
     // claim it first so overlapping runs can't double-send
     const { data: claimed } = await sb.from('sent_reminders')
       .upsert({ event_id: d.ev.id, member_id: d.member.id, occ_start: new Date(d.occ).toISOString(), minutes: d.minutes },
         { onConflict: 'event_id,member_id,occ_start,minutes', ignoreDuplicates: true }).select();
     if (!claimed || !claimed.length) continue;
-    delivered += await pushTo(sb, subs.data.filter(s => s.user_id === d.member.user_id), describe(d));
+    const r = await pushTo(sb, subs.data.filter(s => s.user_id === d.member.user_id), describe(d));
+    delivered += r.sent; failed += r.failed; lastError = r.lastError || lastError;
   }
   await sb.from('sent_reminders').delete().lt('sent_at', new Date(now - 14 * DAY).toISOString()); // tidy up
-  return json({ due: due.length, delivered });
+  // Delivery failures stay on show ('push') until a later notification goes through, so a broken setup can't hide between runs.
+  if (failed) await sb.from('system_status').upsert({ key: 'push', last_run: new Date().toISOString(), detail: `${failed} notification${failed === 1 ? '' : 's'} could not be delivered: ${lastError}` });
+  else if (delivered) await sb.from('system_status').delete().eq('key', 'push');
+  await beat(sb, null);
+  return json({ due: due.length, delivered, failed });
+}
+
+Deno.serve(async req => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
+  const sb = createClient(Deno.env.get('SUPABASE_URL'), Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'));
+  const body = await req.json().catch(() => ({}));
+
+  // --- test button: the signed-in user sends a notification to their own devices ---
+  if (body.test) {
+    setVapid();
+    const jwt = (req.headers.get('authorization') || '').replace(/^Bearer /i, '');
+    const { data: { user } } = await sb.auth.getUser(jwt);
+    if (!user) return json({ error: 'not signed in' }, 401);
+    const { data: subs } = await sb.from('push_subscriptions').select('*').eq('user_id', user.id);
+    const { sent } = await pushTo(sb, subs || [], { title: 'Notifications are working 🎉', body: 'Reminders from the family calendar will show up like this.', tag: 'test' });
+    return json({ devices: (subs || []).length, sent });
+  }
+
+  // --- scheduled run ---
+  if (req.headers.get('x-cron-secret') !== Deno.env.get('CRON_SECRET')) return json({ error: 'forbidden' }, 403);
+  try { return await scheduledRun(sb); }
+  catch (e) { console.error(e); await beat(sb, `crashed: ${e.message || e}`); return json({ error: String(e.message || e) }, 500); }
 });

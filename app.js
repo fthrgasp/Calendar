@@ -74,9 +74,23 @@ function toast(msg) {
 // ---------- data layer ----------
 let sb, db = null; // db = { me, familyId, members[], events[] }
 const run = async q => { const { data, error } = await q; if (error) throw error; return data; };
+// Supabase hands back at most 1000 rows per request (its "Max rows" API setting) and says nothing about the rest,
+// so anything that grows over time is read a page at a time. `build` makes a fresh, ordered query for each page.
+const PAGE = 1000;
+async function runAll(build) {
+  const rows = [];
+  for (let from = 0; ; from += PAGE) {
+    const page = await run(build().range(from, from + PAGE - 1));
+    rows.push(...page);
+    if (page.length < PAGE) return rows;
+  }
+}
 const member = id => db.members.find(m => m.id === id);
 const me = () => member(db.me);
 const myTz = () => (db && me() && me().tz) || deviceTz;
+// The data is re-read from the server when the app comes back to the foreground, possibly while a form is open.
+// Changes are applied to the event's copy in the current data, so the screen shows what was saved.
+const live = ev => db.events.find(e => e.id === ev.id) || ev;
 
 const store = {
   async load(userId) {
@@ -87,8 +101,8 @@ const store = {
     await sb.from('events').delete().eq('family_id', familyId).lt('deleted_at', cutoff); // expire old trash
     const [members, events, rems] = await Promise.all([
       run(sb.from('members').select('*').eq('family_id', familyId).order('created_at')),
-      run(sb.from('events').select('*, event_members(member_id)').eq('family_id', familyId)),
-      run(sb.from('reminders').select('event_id, minutes').eq('member_id', mine[0].id)),
+      runAll(() => sb.from('events').select('*, event_members(member_id)').eq('family_id', familyId).order('id')),
+      runAll(() => sb.from('reminders').select('event_id, minutes').eq('member_id', mine[0].id).order('event_id')),
     ]);
     const remMap = Object.fromEntries(rems.map(r => [r.event_id, r.minutes]));
     db = {
@@ -109,7 +123,7 @@ const store = {
     try { db.customMotds = await run(sb.from('custom_motds').select('id, text, spicy, author_id').eq('family_id', familyId).order('created_at')); db.customMotdsOk = true; }
     catch (e) { db.customMotds = []; db.customMotdsOk = false; } // table not created yet: the built-in lines still work
     try { // single-day changes to repeating events; row-level security limits this to the family
-      const exs = await run(sb.from('event_exceptions').select('*'));
+      const exs = await runAll(() => sb.from('event_exceptions').select('*').order('id'));
       db.exceptionsOk = true;
       const byId = Object.fromEntries(db.events.map(ev => [ev.id, ev]));
       for (const ev of db.events) ev.exceptions = [];
@@ -606,6 +620,7 @@ $('#occCancel').onclick = () => $('#occDlg').close();
 const NO_CHANGES = { skipped: false, new_date: null, title: null, start_time: null, end_time: null, all_day: null, location: null, notes: null };
 // Keep only what differs from the series (null = follows the series). Nothing different at all = no exception.
 function saveException(s, row, existing) {
+  s = live(s);
   const x = { ...NO_CHANGES, ...row };
   const empty = !x.skipped && ['new_date', 'title', 'all_day', 'start_time', 'end_time', 'location', 'notes'].every(k => x[k] === null);
   if (empty) { if (existing) removeException(s, existing); return; }
@@ -613,6 +628,7 @@ function saveException(s, row, existing) {
   render(); persist(() => store.saveException(s, x));
 }
 function removeException(s, x) {
+  s = live(s);
   s.exceptions = (s.exceptions || []).filter(y => y.original_date !== x.original_date);
   render(); persist(() => store.removeException(s, x));
 }
@@ -659,7 +675,7 @@ function renderExcList(ev) {
   $('#excRow').hidden = !list.length;
   $('#excList').replaceChildren(...list.map(x => el('div', { class: 'trash-row' },
     el('span', {}, describeException(x)),
-    el('button', { type: 'button', onclick: () => { if (confirm('Put that day back to normal?')) { removeException(ev, x); renderExcList(ev); } } }, 'Restore'))));
+    el('button', { type: 'button', onclick: () => { if (confirm('Put that day back to normal?')) { removeException(ev, x); renderExcList(live(ev)); } } }, 'Restore'))));
 }
 
 // Read-only card: tapping an event only looks. Changing anything takes a deliberate press of Edit.
@@ -828,7 +844,7 @@ let chronoLoading = null;
 function loadChrono() {
   if (window.chrono) return Promise.resolve();
   return chronoLoading ||= new Promise((resolve, reject) => {
-    const s = el('script', { src: 'vendor/chrono-2.5.0.js?v=27' });
+    const s = el('script', { src: 'vendor/chrono-2.5.0.js?v=28' });
     s.onload = resolve;
     s.onerror = () => { chronoLoading = null; reject(new Error('chrono failed to load')); };
     document.head.append(s);
@@ -875,7 +891,7 @@ $('#cancelBtn').onclick = () => dlg.close();
 form.onsubmit = e => {
   e.preventDefault();
   const f = form.elements;
-  const ev = editing || { id: uuid(), reminders: {}, created_by: db.me, deleted_at: null };
+  const ev = editing ? live(editing) : { id: uuid(), reminders: {}, created_by: db.me, deleted_at: null };
   Object.assign(ev, {
     title: f.title.value.trim(), date: f.date.value, all_day: f.all_day.checked,
     start_time: f.all_day.checked ? '' : f.start_time.value, end_time: f.all_day.checked ? '' : f.end_time.value,
@@ -896,7 +912,7 @@ form.onsubmit = e => {
   const wantYears = f.repeat.value === 'yearly' && f.show_years.checked;
   if (wantYears || ev.show_years !== undefined) ev.show_years = wantYears;
   ev.reminders[db.me] = [...selRemind].sort((a, b) => a - b);
-  if (!editing) db.events.push(ev);
+  if (!db.events.includes(ev)) db.events.push(ev);
   dlg.close(); render();
   persist(() => store.saveEvent(ev));
 };
@@ -904,7 +920,7 @@ form.onsubmit = e => {
 $('#delBtn').onclick = () => {
   const msg = editing.repeat !== 'none' ? 'Delete this whole repeating series? (It goes to Trash for 30 days.)' : 'Delete this event? (It goes to Trash for 30 days.)';
   if (!confirm(msg)) return;
-  const ev = editing;
+  const ev = live(editing);
   ev.deleted_at = new Date().toISOString();
   dlg.close(); render();
   persist(() => store.setDeleted(ev, ev.deleted_at));
@@ -939,10 +955,10 @@ function renderMenu() {
   $('#trashList').replaceChildren(...trashed.map(ev => el('div', { class: 'trash-row' },
     el('span', {}, `${ev.title} (${ev.date})`),
     el('span', {},
-      el('button', { onclick: () => { ev.deleted_at = null; persist(() => store.setDeleted(ev, null)); renderMenu(); render(); } }, 'Restore'),
+      el('button', { onclick: () => { const cur = live(ev); cur.deleted_at = null; persist(() => store.setDeleted(cur, null)); renderMenu(); render(); } }, 'Restore'),
       el('button', { class: 'danger', onclick: () => {
         if (!confirm('Permanently delete?')) return;
-        db.events = db.events.filter(x => x !== ev); persist(() => store.hardDelete(ev)); renderMenu();
+        db.events = db.events.filter(x => x.id !== ev.id); persist(() => store.hardDelete(ev)); renderMenu();
       } }, 'Delete forever')))));
   $('#trashList').hidden = true;
   $('#inviteOut').hidden = true;
@@ -976,21 +992,23 @@ $('#feedCopy').onclick = async () => {
 };
 
 // ---------- reminder health (heartbeat) ----------
-// The reminder function stamps system_status every minute. If the stamp goes stale, something upstream stopped
-// (most often "Verify JWT" flipping back on), so say so instead of letting reminders fail silently.
+// The reminder function stamps system_status at the end of every run ('reminders'; detail = what went wrong, if anything)
+// and records notifications that failed to send ('push', cleared once one goes through). If the stamp goes stale, something
+// upstream stopped (most often "Verify JWT" flipping back on), so say so instead of letting reminders fail silently.
 const STALE_MIN = 10;
 const ageLabel = m => m < 60 ? `${m} min` : m < 1440 ? `${Math.floor(m / 60)} hr` : `${Math.floor(m / 1440)} days`;
 async function checkReminderHealth() {
   let state = 'unknown', text = '';
   try {
-    const rows = await run(sb.from('system_status').select('last_run, detail').eq('key', 'reminders').limit(1));
-    if (!rows.length) { state = 'none'; text = "The reminder checker hasn't reported in yet. Give it a few minutes, or redeploy the send-reminders function."; }
-    else {
-      const age = Math.max(0, Math.floor((Date.now() - Date.parse(rows[0].last_run)) / 60000));
-      if (age >= STALE_MIN) { state = 'stale'; text = `⚠ The reminder checker last ran ${ageLabel(age)} ago, so reminders may not be sending. The usual cause is "Verify JWT" switching back on for the send-reminders function in Supabase.`; }
-      else if (rows[0].detail) { state = 'error'; text = `⚠ The reminder checker is running but hit a problem: ${rows[0].detail}`; }
-      else { state = 'ok'; text = `✓ Reminder checker ran ${age < 1 ? 'just now' : ageLabel(age) + ' ago'}.`; }
-    }
+    const rows = await run(sb.from('system_status').select('key, last_run, detail').in('key', ['reminders', 'push']));
+    const beat = rows.find(r => r.key === 'reminders'), push = rows.find(r => r.key === 'push' && r.detail);
+    const age = r => Math.max(0, Math.floor((Date.now() - Date.parse(r.last_run)) / 60000));
+    const ago = r => age(r) < 1 ? 'just now' : ageLabel(age(r)) + ' ago';
+    if (!beat) { state = 'none'; text = "The reminder checker hasn't reported in yet. Give it a few minutes, or redeploy the send-reminders function."; }
+    else if (age(beat) >= STALE_MIN) { state = 'stale'; text = `⚠ The reminder checker last ran ${ago(beat)}, so reminders may not be sending. The usual cause is "Verify JWT" switching back on for the send-reminders function in Supabase.`; }
+    else if (beat.detail) { state = 'error'; text = `⚠ The reminder checker is running but hit a problem: ${beat.detail}`; }
+    else if (push) { state = 'error'; text = `⚠ Reminders are being checked, but ${push.detail} (${ago(push)}). This clears once one goes through; if it doesn't, try "Send a test" on each phone to find the one that isn't getting them.`; }
+    else { state = 'ok'; text = `✓ Reminder checker ran ${ago(beat)}.`; }
   } catch (e) { state = 'unknown'; text = ''; }              // the table isn't there yet: say nothing
   if (db) db.reminderHealth = state;
   $('#menuBtn').classList.toggle('alert', state === 'stale' || state === 'error');
@@ -1020,7 +1038,7 @@ async function syncPushDevice(userId) {
   try { const sub = await currentSub(); if (sub && Notification.permission === 'granted') await saveSub(sub, userId); }
   catch (e) { console.error(e); }
 }
-const APP_BUILD = 'v27';
+const APP_BUILD = 'v28';
 // One line of plain-text device state, so "it doesn't work" can be diagnosed without guessing.
 async function showPushDiag() {
   const parts = [`build ${APP_BUILD}`, `Home Screen app: ${isStandalone() ? 'yes' : 'no'}`];
@@ -1281,6 +1299,7 @@ function handleAuthEvent(event, session) {
   sb = supabase.createClient(FAMCAL_CONFIG.url, FAMCAL_CONFIG.key);
   sb.auth.onAuthStateChange(handleAuthEvent);
   if (reset.failed) { history.replaceState(null, '', location.pathname); showResetFailed(); }
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && db) refresh(); });
+  // Not while a form or menu is open: it would be left holding copies of data that were just replaced.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && db && !document.querySelector('dialog[open]')) refresh(); });
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 })();

@@ -167,6 +167,19 @@ function buildCalendar(events, members, exceptions = []) {
 
 const notFound = () => new Response('Not found', { status: 404 });
 
+// Supabase hands back at most 1000 rows per request (its "Max rows" API setting) and says nothing about the rest,
+// so anything that grows over time is read a page at a time. `build` makes a fresh, ordered query for each page.
+const PAGE = 1000;
+async function fetchAll(build) {
+  const rows = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await build().range(from, from + PAGE - 1);
+    if (error) return { data: null, error };
+    rows.push(...data);
+    if (data.length < PAGE) return { data: rows, error: null };
+  }
+}
+
 Deno.serve(async req => {
   if (req.method !== 'GET' && req.method !== 'HEAD') return new Response('Method not allowed', { status: 405 });
   const token = new URL(req.url).searchParams.get('t') || '';
@@ -176,14 +189,15 @@ Deno.serve(async req => {
   if (!tok) return notFound();                                    // wrong or regenerated link: reveal nothing
 
   const [events, members] = await Promise.all([
-    sb.from('events').select('*, event_members(member_id)').eq('family_id', tok.family_id).is('deleted_at', null).order('date'),
+    fetchAll(() => sb.from('events').select('*, event_members(member_id)').eq('family_id', tok.family_id).is('deleted_at', null).order('date').order('id')),
     sb.from('members').select('id, name').eq('family_id', tok.family_id),
   ]);
   if (events.error || members.error) return new Response('Server error', { status: 500 });
   const evs = events.data.map(e => ({ ...e, who: e.event_members.map(x => x.member_id) }));
-  let exceptions = [];
-  if (evs.length) { const ex = await sb.from('event_exceptions').select('*').in('event_id', evs.map(e => e.id)); if (!ex.error) exceptions = ex.data; }
-  const body = buildCalendar(evs, members.data, exceptions);
+  // Single-day changes, matched to this family through their event (a list of every event id would make the URL too long).
+  // If that table doesn't exist yet, carry on without them.
+  const ex = await fetchAll(() => sb.from('event_exceptions').select('*, events!inner(family_id)').eq('events.family_id', tok.family_id).order('id'));
+  const body = buildCalendar(evs, members.data, ex.error ? [] : ex.data);
   return new Response(req.method === 'HEAD' ? null : body, {
     headers: { 'Content-Type': 'text/calendar; charset=utf-8', 'Cache-Control': 'no-cache', 'Content-Disposition': 'inline; filename="trying-my-best.ics"' },
   });
