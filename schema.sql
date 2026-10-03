@@ -184,3 +184,18 @@ begin
 end $$;
 revoke all on function public.rotate_feed_token() from public, anon;
 grant execute on function public.rotate_feed_token() to authenticated;
+
+-- Lines the family adds to the message of the day (Settings). Anyone in the family can read, add, and remove them.
+create table public.custom_motds (
+  id         uuid primary key default gen_random_uuid(),
+  family_id  uuid not null references public.families on delete cascade,
+  text       text not null check (char_length(text) between 1 and 200),
+  spicy      boolean not null default false,
+  author_id  uuid references public.members on delete set null,
+  created_at timestamptz not null default now()
+);
+alter table public.custom_motds enable row level security;
+create policy "family reads lines" on public.custom_motds for select using (family_id in (select public.my_family_ids()));
+create policy "family adds lines" on public.custom_motds for insert
+  with check (family_id in (select public.my_family_ids()) and (author_id is null or author_id in (select id from public.members where user_id = auth.uid())));
+create policy "family removes lines" on public.custom_motds for delete using (family_id in (select public.my_family_ids()));

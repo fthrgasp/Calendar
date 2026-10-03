@@ -13,7 +13,7 @@ import json, sys
 
 TABLES = [  # (table, primary key columns), in dependency order
     ('families', ['id']), ('members', ['id']), ('events', ['id']),
-    ('event_members', ['event_id', 'member_id']), ('reminders', ['event_id', 'member_id']),
+    ('event_members', ['event_id', 'member_id']), ('reminders', ['event_id', 'member_id']), ('custom_motds', ['id']),
 ]
 
 def main():

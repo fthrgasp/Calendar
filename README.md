@@ -7,12 +7,12 @@ Live at https://cal.tryingmybest.org (Spaceship cPanel hosting). Backend: Supaba
 Month / week / agenda views · per-person colors and who's-involved · repeats (daily, weekly on chosen days, every N weeks, monthly, yearly) · multi-day events · Duplicate event · "turns 36" age counting ·
 time zones (everyone sees times in their own zone) · per-person reminders with web push · read-only event cards (edit is a separate, deliberate button) ·
 Quick add from pasted text (+ iPhone Shortcut, see `docs/SHORTCUT.md`) · jump-to-date · 12/24-hour display · soft-delete Trash (30 days) ·
-message of the day with a per-device "spicy" switch (`motd.js`: add your own lines) · invite links · daily backups.
+message of the day with a per-device "spicy" switch (built-in lines in `motd.js`, plus your own added in Settings) · invite links · daily backups.
 
 ## Files
 - `index.html`, `app.js`, `style.css`, `sw.js`, `manifest.webmanifest`, `icons/` — the app. `motd.js` — messages. `quickadd.js` + `vendor/` — text-to-event reading.
 - `config.js` — Supabase URL + publishable key (public by design; access is enforced by RLS).
-- `schema.sql` — full database for a fresh Supabase project. `migrations/` — incremental SQL for the existing project, applied in order (001–011).
+- `schema.sql` — full database for a fresh Supabase project. `migrations/` — incremental SQL for the existing project, applied in order (001–012).
 - `supabase/functions/send-reminders/` — the reminder/push function. `supabase/functions/calendar-feed/` — serves the family calendar as an .ics feed (Settings → Calendar feed); needs Verify JWT OFF. `scripts/` — `build_zip.sh`, `backup.sh`, `backup_to_sql.py` (restore).
 - `icons/` — Home Screen icons, generated from `source-puffin-transparent.webp` by `python3 scripts/make_icons.py "#1C3D54"` (any tile color).
 - `secrets/` — **never committed.** VAPID keys, CRON_SECRET, backup password, and "READY" SQL/scripts with secrets filled in.
@@ -33,4 +33,4 @@ message of the day with a per-device "spicy" switch (`motd.js`: add your own lin
   (`bash $HOME/calendar-backup.sh > /dev/null`), keeping 60 days in `~/calendar-backups`. Restore: `scripts/backup_to_sql.py`. Test a restore occasionally.
 
 ## Ideas not built yet
-Forgot-password flow · "turns 36" in push notifications (needs a function redeploy) · per-occurrence edits on repeating events · custom message-of-the-day lines added from the app.
+Forgot-password flow · "turns 36" in push notifications (needs a function redeploy) · per-occurrence edits on repeating events 

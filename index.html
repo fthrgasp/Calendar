@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Trying My Best</title>
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="apple-touch-icon" href="icons/icon-180.png?v=24">
-<link rel="icon" type="image/png" href="icons/icon-192.png?v=24">
+<link rel="apple-touch-icon" href="icons/icon-180.png?v=25">
+<link rel="icon" type="image/png" href="icons/icon-192.png?v=25">
 <meta name="theme-color" content="#2b6cb0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Trying My Best">
-<link rel="stylesheet" href="style.css?v=24">
+<link rel="stylesheet" href="style.css?v=25">
 </head>
 <body>
 <header class="top">
@@ -143,6 +143,12 @@
     <h3>Message of the day</h3>
     <label class="check"><input type="checkbox" id="spicyBox"> Spicy messages 🌶️</label>
     <small>Off by default. Only affects this device — flip it off before handing the phone to someone small.</small>
+    <h4 class="sub">Add your own line</h4>
+    <div class="addline"><input id="motdNew" maxlength="200" placeholder="Something worth reading every morning…" autocomplete="off"><button id="motdAdd">Add</button></div>
+    <label class="check"><input type="checkbox" id="motdNewSpicy"> This one's spicy 🌶️</label>
+    <small id="motdNote"></small>
+    <div id="motdList"></div>
+    <small>Everyone in the family sees these (spicy ones only on phones with the spicy switch on), each with the name of whoever added it.</small>
   </section>
   <section>
     <h3>Notifications</h3>
@@ -186,9 +192,9 @@
 <div id="toast" hidden></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="config.js?v=24"></script>
-<script src="motd.js?v=24"></script>
-<script src="quickadd.js?v=24"></script>
-<script src="app.js?v=24"></script>
+<script src="config.js?v=25"></script>
+<script src="motd.js?v=25"></script>
+<script src="quickadd.js?v=25"></script>
+<script src="app.js?v=25"></script>
 </body>
 </html>

@@ -123,3 +123,8 @@ section button { margin: 4px 4px 4px 0; }
 #feedOut { display: flex; gap: 6px; align-items: center; margin: 6px 0; }
 #feedOut input { flex: 1; min-width: 0; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font-size: .8rem; }
 #feedNote { display: block; margin-top: 4px; }
+
+#motd .by { display: block; margin-top: 3px; font-style: normal; font-size: .8em; opacity: .85; }
+.addline { display: flex; gap: 6px; margin: 4px 0 2px; }
+.addline input { flex: 1; min-width: 0; padding: 7px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font-size: .95rem; }
+h4.sub { margin: 14px 0 4px; font-size: .85rem; color: var(--muted); font-weight: 600; }

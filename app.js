@@ -106,6 +106,8 @@ const store = {
       })),
     };
     hour24 = me().time_format === '24';
+    try { db.customMotds = await run(sb.from('custom_motds').select('id, text, spicy, author_id').eq('family_id', familyId).order('created_at')); db.customMotdsOk = true; }
+    catch (e) { db.customMotds = []; db.customMotdsOk = false; } // table not created yet: the built-in lines still work
     syncPushDevice(userId);
     return true;
   },
@@ -365,9 +367,59 @@ function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h
 const poolOf = (section, spicy) => section ? [...(section.clean || []), ...(spicy ? section.spicy || [] : [])] : [];
 const toMin = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
 
+// Everyday lines come from a shuffled "deck" so no line repeats until every line has had a turn (the same deck for everyone,
+// dealt by date). The family's own lines are in the deck CUSTOM_BOOST times, spread out, so they come up a bit more often.
+const CUSTOM_BOOST = 2;
+function mulberry32(seed) {
+  return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+function generalPool(spicy) {
+  const base = poolOf(window.MOTD.general, spicy).map(text => ({ text }));
+  const custom = ((db && db.customMotds) || []).filter(c => spicy || !c.spicy).slice().sort((a, b) => (a.id < b.id ? -1 : 1));
+  // never let the family's lines take over: cap at about 40% of the deck
+  const copies = custom.length ? Math.max(1, Math.min(CUSTOM_BOOST, Math.floor(0.4 * base.length / custom.length))) : 0;
+  const pool = [...base];
+  for (let k = 0; k < copies; k++) for (const c of custom) pool.push({ text: c.text, by: c.author_id });
+  return pool;
+}
+function cycleOrder(pool, cycle) {
+  const n = pool.length, rand = mulberry32(hashStr(`motd-${n}-${cycle}`));
+  const shuffled = Array.from({ length: n }, (_, i) => i);
+  for (let i = n - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]; }
+  // Deal the shuffled deck, skipping any card that matches the one just dealt (boosted lines are in the deck twice).
+  // Each step removes one card, so this always finishes.
+  const order = [];
+  while (shuffled.length) {
+    const last = order.length ? pool[order[order.length - 1]].text : null;
+    let k = shuffled.findIndex(i => pool[i].text !== last);
+    if (k < 0) k = 0;                        // only copies of the last line are left
+    order.push(shuffled.splice(k, 1)[0]);
+  }
+  // Rare leftovers at the tail: swap an offending card with an earlier one that doesn't create a new back-to-back pair.
+  const T = i => pool[order[i]].text;
+  const clash = i => (i > 0 && T(i) === T(i - 1)) || (i < n - 1 && T(i) === T(i + 1));
+  for (let j = 1; j < n; j++) {
+    if (T(j) !== T(j - 1)) continue;
+    for (let m = 1; m < n - 1; m++) {
+      if (m === j || m === j - 1) continue;
+      [order[j], order[m]] = [order[m], order[j]];
+      if (!clash(j) && !clash(m)) break;
+      [order[j], order[m]] = [order[m], order[j]];
+    }
+  }
+  return order;
+}
+function cycleLine(pool, dayNumber) {
+  const n = pool.length, cycle = Math.floor(dayNumber / n), idx = dayNumber - cycle * n;
+  const order = cycleOrder(pool, cycle), prev = cycleOrder(pool, cycle - 1);
+  if (n > 2 && pool[order[0]].text === pool[prev[n - 1]].text) [order[0], order[1]] = [order[1], order[0]]; // no repeat across the seam either
+  return pool[order[idx]];
+}
+
+// Returns { text, by } where `by` is the member id of whoever wrote a family line (shown as "— Name").
 function motdText() {
   const M = window.MOTD;
-  if (!M || !db) return '';
+  if (!M || !db) return { text: '' };
   const spicy = spicyOn(), nowWall = msToWall(Date.now(), myTz()), today = nowWall.date;
   const todays = visibleEvents(parse(today), parse(today), true);
 
@@ -377,8 +429,8 @@ function motdText() {
     .sort((a, b) => a.start.localeCompare(b.start))[0];
   const soonPool = soon && poolOf(M.soon, spicy);
   if (soonPool && soonPool.length) {
-    return soonPool[hashStr(today + soon.ev.id) % soonPool.length]
-      .replace('{title}', soon.ev.title).replace('{mins}', toMin(soon.start) - toMin(nowWall.time));
+    return { text: soonPool[hashStr(today + soon.ev.id) % soonPool.length]
+      .replace('{title}', soon.ev.title).replace('{mins}', toMin(soon.start) - toMin(nowWall.time)) };
   }
 
   const dow = parse(today).getDay();
@@ -386,12 +438,45 @@ function motdText() {
   const keys = Object.keys(applies).filter(k => applies[k] && poolOf(M[k], spicy).length);
   if (keys.length && hashStr(today + 'roll') % 10 < 4) {
     const key = keys[hashStr(today + 'key') % keys.length], pool = poolOf(M[key], spicy);
-    return pool[hashStr(today + key) % pool.length];
+    return { text: pool[hashStr(today + key) % pool.length] };
   }
-  const pool = poolOf(M.general, spicy);
-  return pool.length ? pool[hashStr(today) % pool.length] : '';
+  const pool = generalPool(spicy);
+  if (!pool.length) return { text: '' };
+  const [y, m, d] = today.split('-').map(Number);
+  return cycleLine(pool, Math.floor(Date.UTC(y, m - 1, d) / 864e5));
 }
-function renderMotd() { $('#motd').textContent = motdText(); }
+function renderMotd() {
+  const m = motdText(), box = $('#motd'), who = m.by && member(m.by);
+  box.textContent = m.text;
+  if (who) box.append(el('small', { class: 'by' }, `— ${who.name}`));
+}
+
+// ---------- the family's own message lines (Settings) ----------
+function renderCustomMotds() {
+  $('#motdNote').textContent = db.customMotdsOk ? '' : "Custom lines aren't set up in the database yet.";
+  $('#motdAdd').disabled = !db.customMotdsOk;
+  $('#motdList').replaceChildren(...db.customMotds.map(c => el('div', { class: 'trash-row' },
+    el('span', {}, c.text + (c.spicy ? ' 🌶️' : ''), c.author_id && member(c.author_id) ? el('small', {}, ` — ${member(c.author_id).name}`) : ''),
+    el('button', { class: 'danger', onclick: () => deleteCustomMotd(c) }, 'Delete'))));
+}
+async function addCustomMotd() {
+  const input = $('#motdNew'), text = input.value.trim();
+  if (!text) return;
+  try {
+    const [row] = await run(sb.from('custom_motds').insert({ family_id: db.familyId, text, spicy: $('#motdNewSpicy').checked, author_id: db.me }).select('id, text, spicy, author_id'));
+    db.customMotds.push(row); input.value = ''; $('#motdNewSpicy').checked = false;
+    renderCustomMotds(); renderMotd(); toast('Added!');
+  } catch (e) { console.error(e); toast("Couldn't add that line."); }
+}
+async function deleteCustomMotd(c) {
+  if (!confirm(`Delete this line?\n\n“${c.text}”`)) return;
+  try {
+    await run(sb.from('custom_motds').delete().eq('id', c.id));
+    db.customMotds = db.customMotds.filter(x => x.id !== c.id); renderCustomMotds(); renderMotd();
+  } catch (e) { console.error(e); toast("Couldn't delete that line."); }
+}
+$('#motdAdd').onclick = addCustomMotd;
+$('#motdNew').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); addCustomMotd(); } };
 setInterval(() => { if (db) renderMotd(); }, 60000); // keeps "starts in N min" fresh
 
 // ---------- navigation ----------
@@ -617,7 +702,7 @@ let chronoLoading = null;
 function loadChrono() {
   if (window.chrono) return Promise.resolve();
   return chronoLoading ||= new Promise((resolve, reject) => {
-    const s = el('script', { src: 'vendor/chrono-2.5.0.js?v=24' });
+    const s = el('script', { src: 'vendor/chrono-2.5.0.js?v=25' });
     s.onload = resolve;
     s.onerror = () => { chronoLoading = null; reject(new Error('chrono failed to load')); };
     document.head.append(s);
@@ -737,6 +822,7 @@ function renderMenu() {
   $('#inviteOut').hidden = true;
   renderPushStatus();
   renderFeed();
+  renderCustomMotds();
 }
 $('#menuBtn').onclick = () => { renderMenu(); menu.showModal(); };
 
@@ -783,7 +869,7 @@ async function syncPushDevice(userId) {
   try { const sub = await currentSub(); if (sub && Notification.permission === 'granted') await saveSub(sub, userId); }
   catch (e) { console.error(e); }
 }
-const APP_BUILD = 'v24';
+const APP_BUILD = 'v25';
 // One line of plain-text device state, so "it doesn't work" can be diagnosed without guessing.
 async function showPushDiag() {
   const parts = [`build ${APP_BUILD}`, `Home Screen app: ${isStandalone() ? 'yes' : 'no'}`];
