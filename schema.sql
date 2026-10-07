@@ -2,6 +2,9 @@
 -- Paste this whole file into Supabase > SQL Editor > New query > Run. Safe to run once on a fresh project.
 -- Every table is locked down with Row Level Security: a signed-in user can only see data
 -- belonging to a family they are a member of.
+-- After this, three setup files need secrets or the reminder function first, so they stay separate:
+--   secrets/005_backup_READY.sql (the backup password), migrations/004_push_schedule.sql (reminders, once the
+--   send-reminders function is deployed), then migrations/015_cron_cleanup.sql.
 
 create table public.families (
   id         uuid primary key default gen_random_uuid(),
@@ -229,3 +232,73 @@ create table public.system_status (
 );
 alter table public.system_status enable row level security;
 create policy "signed-in users read status" on public.system_status for select to authenticated using (true);
+
+-- ---------- daily backup ----------
+-- Read-only export door for scripts/backup.sh. The password's hash goes in with secrets/005_backup_READY.sql.
+create table public.backup_config (
+  id          int primary key default 1 check (id = 1),   -- exactly one row
+  secret_hash text not null                               -- sha256 of the backup password (the password itself is never stored)
+);
+alter table public.backup_config enable row level security;   -- no policies: unreadable through the API
+
+create function public.backup_export(secret text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+begin
+  if not exists (select 1 from backup_config where secret_hash = encode(sha256(convert_to(secret, 'utf8')), 'hex')) then
+    perform pg_sleep(1);                                   -- slow down guessing
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+  return jsonb_build_object(
+    'exported_at',   now(),
+    'families',      (select coalesce(jsonb_agg(to_jsonb(t)), '[]') from families t),
+    'members',       (select coalesce(jsonb_agg(to_jsonb(t)), '[]') from members t),
+    'events',        (select coalesce(jsonb_agg(to_jsonb(t)), '[]') from events t),
+    'event_members', (select coalesce(jsonb_agg(to_jsonb(t)), '[]') from event_members t),
+    'reminders',     (select coalesce(jsonb_agg(to_jsonb(t)), '[]') from reminders t),
+    'custom_motds',  (select coalesce(jsonb_agg(to_jsonb(t)), '[]') from custom_motds t),
+    'event_exceptions', (select coalesce(jsonb_agg(to_jsonb(t)), '[]') from event_exceptions t)
+  );
+end $$;
+revoke all on function public.backup_export(text) from public;
+grant execute on function public.backup_export(text) to anon, authenticated;
+
+-- ---------- Saving an event is all-or-nothing.
+-- The app used to save in four separate steps (the event, clear its people, add its people back, your reminders). If one
+-- failed partway, say a dropped connection after "clear its people", the event was left with nobody on it, and nobody got
+-- reminded. This does the same four steps as one transaction: they all happen, or none do.
+-- It runs with the caller's own permissions (security invoker), so the usual rules apply unchanged: anyone in the family
+-- can save any family event, and each person can only set their own reminders.
+create or replace function public.save_event(ev jsonb, who jsonb, my_member uuid, my_minutes jsonb)
+returns void language plpgsql security invoker set search_path = public as $$
+declare r events;
+begin
+  r := jsonb_populate_record(null::events, ev);
+  insert into events (id, family_id, title, date, all_day, start_time, end_time, location, notes, repeat, repeat_until, tz,
+                      show_years, repeat_every, weekdays, end_date, created_by, deleted_at)
+  values (r.id, r.family_id, r.title, r.date, coalesce(r.all_day, false), r.start_time, r.end_time, coalesce(r.location, ''),
+          coalesce(r.notes, ''), coalesce(r.repeat, 'none'), r.repeat_until, r.tz, coalesce(r.show_years, false),
+          coalesce(r.repeat_every, 1), r.weekdays, r.end_date, r.created_by, r.deleted_at)
+  on conflict (id) do update set
+    family_id = excluded.family_id, title = excluded.title, date = excluded.date, all_day = excluded.all_day,
+    start_time = excluded.start_time, end_time = excluded.end_time, location = excluded.location, notes = excluded.notes,
+    repeat = excluded.repeat, repeat_until = excluded.repeat_until, tz = excluded.tz, show_years = excluded.show_years,
+    repeat_every = excluded.repeat_every, weekdays = excluded.weekdays, end_date = excluded.end_date,
+    created_by = excluded.created_by, deleted_at = excluded.deleted_at;
+  delete from event_members where event_id = r.id;
+  insert into event_members (event_id, member_id) select r.id, m::uuid from jsonb_array_elements_text(who) m;
+  insert into reminders (event_id, member_id, minutes)
+    values (r.id, my_member, array(select m::int from jsonb_array_elements_text(my_minutes) m))
+    on conflict (event_id, member_id) do update set minutes = excluded.minutes;
+end $$;
+revoke all on function public.save_event(jsonb, jsonb, uuid, jsonb) from public, anon;
+grant execute on function public.save_event(jsonb, jsonb, uuid, jsonb) to authenticated;
+
+-- ---------- Who a person IS can't be changed from the app; everything else about them still can.
+-- Anyone in the family can still rename people, change colors, reminders, time zone and display, and add someone without
+-- a login. What's locked is a person's login (user_id) and family (family_id): changing those from the app could quietly
+-- move someone's account onto another person or into another family. Sign-up and invites set them, and they run as the
+-- database, so they're unaffected.
+-- Note for later: a new column added to members has to be added to the lists below before the app can save it.
+revoke insert, update on public.members from anon, authenticated;
+grant insert (family_id, name, color, default_reminders, tz, time_format) on public.members to authenticated;
+grant update (name, color, default_reminders, tz, time_format) on public.members to authenticated;

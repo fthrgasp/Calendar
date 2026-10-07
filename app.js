@@ -136,7 +136,7 @@ const store = {
     return true;
   },
   async saveEvent(ev) {
-    await run(sb.from('events').upsert({
+    const row = {
       id: ev.id, family_id: db.familyId, title: ev.title, date: ev.date, all_day: ev.all_day,
       start_time: ev.all_day ? null : ev.start_time || null, end_time: ev.all_day ? null : ev.end_time || null,
       location: ev.location, notes: ev.notes, repeat: ev.repeat, repeat_until: ev.repeat_until || null, tz: ev.tz || null,
@@ -145,10 +145,16 @@ const store = {
       ...(ev.weekdays === undefined ? {} : { weekdays: ev.weekdays }), // and weekdays
       ...(ev.end_date === undefined ? {} : { end_date: ev.end_date || null }), // and end_date
       created_by: ev.created_by, deleted_at: ev.deleted_at,
-    }));
+    };
+    const mine = ev.reminders[db.me] || [];
+    // The event, its people and my reminders in one transaction, so a failure partway can't leave it half-saved.
+    const { error } = await sb.rpc('save_event', { ev: row, who: ev.who, my_member: db.me, my_minutes: mine });
+    if (!error) return;
+    if (error.code !== 'PGRST202') throw error;   // PGRST202: save_event isn't in the database yet (016 not run), so save step by step
+    await run(sb.from('events').upsert(row));
     await run(sb.from('event_members').delete().eq('event_id', ev.id));
     if (ev.who.length) await run(sb.from('event_members').insert(ev.who.map(m => ({ event_id: ev.id, member_id: m }))));
-    await run(sb.from('reminders').upsert({ event_id: ev.id, member_id: db.me, minutes: ev.reminders[db.me] || [] }));
+    await run(sb.from('reminders').upsert({ event_id: ev.id, member_id: db.me, minutes: mine }));
   },
   saveException: (ev, x) => run(sb.from('event_exceptions').upsert({
     event_id: ev.id, original_date: x.original_date, skipped: x.skipped, new_date: x.new_date, title: x.title,
@@ -844,7 +850,7 @@ let chronoLoading = null;
 function loadChrono() {
   if (window.chrono) return Promise.resolve();
   return chronoLoading ||= new Promise((resolve, reject) => {
-    const s = el('script', { src: 'vendor/chrono-2.5.0.js?v=28' });
+    const s = el('script', { src: 'vendor/chrono-2.5.0.js?v=29' });
     s.onload = resolve;
     s.onerror = () => { chronoLoading = null; reject(new Error('chrono failed to load')); };
     document.head.append(s);
@@ -1038,7 +1044,7 @@ async function syncPushDevice(userId) {
   try { const sub = await currentSub(); if (sub && Notification.permission === 'granted') await saveSub(sub, userId); }
   catch (e) { console.error(e); }
 }
-const APP_BUILD = 'v28';
+const APP_BUILD = 'v29';
 // One line of plain-text device state, so "it doesn't work" can be diagnosed without guessing.
 async function showPushDiag() {
   const parts = [`build ${APP_BUILD}`, `Home Screen app: ${isStandalone() ? 'yes' : 'no'}`];

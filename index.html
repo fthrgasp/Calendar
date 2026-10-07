@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Trying My Best</title>
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="apple-touch-icon" href="icons/icon-180.png?v=28">
-<link rel="icon" type="image/png" href="icons/icon-192.png?v=28">
+<link rel="apple-touch-icon" href="icons/icon-180.png?v=29">
+<link rel="icon" type="image/png" href="icons/icon-192.png?v=29">
 <meta name="theme-color" content="#2b6cb0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Trying My Best">
-<link rel="stylesheet" href="style.css?v=28">
+<link rel="stylesheet" href="style.css?v=29">
 </head>
 <body>
 <header class="top">
@@ -218,9 +218,10 @@
   </section>
   <section>
     <h3>Data</h3>
-    <button id="exportBtn">Export everything (JSON)</button>
+    <button id="exportBtn">Download my copy (JSON)</button>
     <button id="trashBtn">Trash (<span id="trashCount">0</span>)</button>
     <div id="trashList"></div>
+    <small>"My copy" is what this phone has loaded, with only your own reminders. It isn't the family backup, which runs every night on its own.</small>
   </section>
   <div class="actions"><span class="spacer"></span><button id="closeMenu" class="primary">Done</button></div>
 </dialog>
@@ -228,10 +229,10 @@
 <div id="gate" hidden></div>
 <div id="toast" hidden></div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="config.js?v=28"></script>
-<script src="motd.js?v=28"></script>
-<script src="quickadd.js?v=28"></script>
-<script src="app.js?v=28"></script>
+<script src="vendor/supabase-js-2.117.2.js"></script>
+<script src="config.js?v=29"></script>
+<script src="motd.js?v=29"></script>
+<script src="quickadd.js?v=29"></script>
+<script src="app.js?v=29"></script>
 </body>
 </html>

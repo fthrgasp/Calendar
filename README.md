@@ -10,10 +10,10 @@ Quick add from pasted text (+ iPhone Shortcut, see `docs/SHORTCUT.md`) · jump-t
 message of the day with a per-device "spicy" switch (built-in lines in `motd.js`, plus your own added in Settings) · invite links · daily backups · forgot-password and change-password · a reminder health check (red dot on the gear if reminders go quiet).
 
 ## Files
-- `index.html`, `app.js`, `style.css`, `sw.js`, `manifest.webmanifest`, `icons/` — the app. `motd.js` — messages. `quickadd.js` + `vendor/` — text-to-event reading.
+- `index.html`, `app.js`, `style.css`, `sw.js`, `manifest.webmanifest`, `icons/` — the app. `motd.js` — messages. `quickadd.js` + `vendor/chrono-*` — text-to-event reading. `vendor/supabase-js-*` — the Supabase client, served from this site at an exact version (see `vendor/README.txt` to update it).
 - `config.js` — Supabase URL + publishable key (public by design; access is enforced by RLS).
-- `schema.sql` — full database for a fresh Supabase project. `migrations/` — incremental SQL for the existing project, applied in order (001–015).
-- `supabase/functions/send-reminders/` — the reminder/push function. `supabase/functions/calendar-feed/` — serves the family calendar as an .ics feed (Settings → Calendar feed); needs Verify JWT OFF. `scripts/` — `build_zip.sh`, `backup.sh`, `backup_to_sql.py` (restore). `tests/` — fast logic checks, run with `bash tests/run.sh` (see `tests/README.md`).
+- `schema.sql` — full database for a fresh Supabase project. `migrations/` — incremental SQL for the existing project, applied in order (001–016).
+- `supabase/functions/send-reminders/` — the reminder/push function. `supabase/functions/calendar-feed/` — serves the family calendar as an .ics feed (Settings → Calendar feed). Both need Verify JWT OFF, which `supabase/config.toml` sets on every CLI deploy. `scripts/` — `build_zip.sh`, `deploy_functions.sh`, `backup.sh`, `backup_to_sql.py` (restore). `tests/` — fast logic checks, run with `bash tests/run.sh` (see `tests/README.md`).
 - `icons/` — Home Screen icons, generated from `source-puffin-transparent.webp` by `python3 scripts/make_icons.py "#1C3D54"` (any tile color).
 - `secrets/` — **never committed.** VAPID keys, CRON_SECRET, backup password, and "READY" SQL/scripts with secrets filled in.
 
@@ -24,18 +24,21 @@ message of the day with a per-device "spicy" switch (built-in lines in `motd.js`
 3. Fully close the app on the phone and reopen from the Home Screen icon.
 
 ## Supabase setup notes
-- Run `schema.sql` on a fresh project. Existing project: run any `migrations/` not yet applied, in order.
+- Run `schema.sql` on a fresh project (its header lists the three setup files that come after it). Existing project: run any `migrations/` not yet applied, in order.
 - Auth: email + password, "Confirm email" OFF. New sign-ups are switched off now that everyone is in (re-enable to invite someone new).
   **Forgot password** emails a reset link through Supabase. In Authentication → URL Configuration, set the Site URL to `https://cal.tryingmybest.org` and add `https://cal.tryingmybest.org/` to Redirect URLs, or the link won't come back to the app.
   The link opens in the phone's browser (iOS can't open a link inside a Home Screen app): choose the new password there, then sign in to the app. Supabase's built-in email is rate-limited to a few messages an hour.
-- Edge function `send-reminders`: paste `index.ts`, set secrets `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`, `CRON_SECRET`.
-  **Turn "Verify JWT" OFF, and re-check it after every redeploy** (the dashboard tends to flip it back on, which silently stops reminders).
+- Edge functions: deploy both with `bash scripts/deploy_functions.sh` (one-time: install the Supabase CLI and `supabase login`). It keeps **"Verify JWT" OFF** every time.
+  Pasting `index.ts` into the dashboard also works, but then re-check Verify JWT after every deploy: the dashboard tends to flip it back on, which silently stops reminders and the feed.
+- `send-reminders` secrets: `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`, `CRON_SECRET`.
   The function also stamps `system_status` at the end of every run (a run that crashes partway records the error instead); Settings shows "Reminder checker ran N min ago",
   and the gear gets a red dot if it goes quiet for 10+ minutes, hits an error, or notifications fail to deliver (that warning clears once one goes through).
   Redeploy it after changes to `index.ts` (it understands skipped/changed days, repeats, and the heartbeat).
-- `calendar-feed` also needs Verify JWT OFF (Google can't log in), and a redeploy after changes to its `index.ts`.
+- `calendar-feed` needs Verify JWT OFF too (Google can't log in), and a redeploy after changes to its `index.ts`.
 - Reminders run from pg_cron every minute (`migrations/004_push_schedule.sql`, with the secret filled in). `015_cron_cleanup.sql` trims pg_cron's own run log daily, which otherwise grows forever.
 - Supabase returns at most 1000 rows per request (API settings → "Max rows"; leave it at 1000 or higher). The app and both functions page through anything that grows (events, reminders, changed days), so keep that in mind for new queries.
+- Saving an event goes through `save_event` (`016_safe_saves.sql`), one transaction, so it can't half-save. Anyone in the family can still edit anything,
+  except a person's login and family, which only sign-up and invites set. A new column on `members` must be added to the grants in 016 before the app can save it.
 - Backups: `migrations/005_backup.sql` + `secrets/005_backup_READY.sql`; `scripts/backup.sh` runs daily from a cPanel cron job
   (`bash $HOME/calendar-backup.sh > /dev/null`), keeping 60 days in `~/calendar-backups`. Restore: `scripts/backup_to_sql.py`. Test a restore occasionally.
 

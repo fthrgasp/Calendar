@@ -1,0 +1,10 @@
+# Settings the Supabase CLI applies every time it deploys a function (`bash scripts/deploy_functions.sh`), so "Verify JWT"
+# can't quietly flip back on. Pasting code into the dashboard ignores this file: deploy that way and you're back to
+# re-checking the toggle by hand.
+project_id = "trying-my-best"   # a local name the CLI requires; the real project is chosen in deploy_functions.sh
+
+[functions.send-reminders]
+verify_jwt = false   # called by pg_cron with its own secret (CRON_SECRET), not a login
+
+[functions.calendar-feed]
+verify_jwt = false   # Google / Apple Calendar fetch it with the feed link's token, not a login

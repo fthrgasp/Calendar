@@ -9,3 +9,7 @@ calendar-deploy*
 .DS_Store
 .claude/
 __pycache__/
+
+# Supabase CLI working files
+supabase/.temp/
+supabase/.branches/

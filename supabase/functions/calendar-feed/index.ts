@@ -3,7 +3,7 @@
 // URL: https://<project>.supabase.co/functions/v1/calendar-feed/trying-my-best.ics?t=<token>
 // The token (Settings > Calendar feed) is the only credential. Turn OFF "Verify JWT" for this function: calendar apps
 // fetch it without a login, and the function checks the token itself. SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are automatic.
-import { createClient } from 'npm:@supabase/supabase-js@2';
+import { createClient } from 'npm:@supabase/supabase-js@2.117.2';
 
 // <core> — pure logic (no network); unit-tested locally in node
 const DAY = 864e5;

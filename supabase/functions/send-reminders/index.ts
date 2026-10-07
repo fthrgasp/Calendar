@@ -5,7 +5,7 @@
 // Secrets (Edge Functions > Secrets): VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT, CRON_SECRET.
 // SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided automatically. Turn OFF "Verify JWT" for this
 // function: the cron call has no login token, so the function checks CRON_SECRET itself.
-import { createClient } from 'npm:@supabase/supabase-js@2';
+import { createClient } from 'npm:@supabase/supabase-js@2.117.2';
 import webpush from 'npm:web-push@3.6.7';
 
 // <core> — pure logic (no network); unit-tested locally in node
